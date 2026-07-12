@@ -41,6 +41,43 @@ Because the component keeps the upstream name, the stock `voice_assistant`
 integration, `micro_wake_word.*` actions, and Home Assistant wake word selection
 keep working unchanged.
 
+### Voice PE overlay
+
+For an adopted Home Assistant Voice PE config (package-based), the whole
+cascade is this overlay — the component override shadows the bundled one and
+`!extend` adds the new blocks to the existing `mww` instance:
+
+```yaml
+external_components:
+  - source: github://darki73/esphome-moww
+    components: [micro_wake_word]
+    refresh: 0s
+
+micro_wake_word:
+  id: !extend mww
+  pcm_history:
+  verifier:
+    model: http://<ha-host>:8123/local/mww/eva_verifier.tflite
+    probability_cutoff: 0.7
+```
+
+The verifier model is downloaded at **build** time and embedded in the
+firmware, like the wake models themselves. Without the `verifier:` block the
+firmware is behaviorally identical to stock (verified: both variants compile;
+the cascade code is fully `#ifdef`-gated).
+
+### Notes
+
+- Verification runs inline on the inference task (~tens of ms per candidate);
+  the audio transport ring buffer is enlarged 120 ms -> 500 ms to absorb it.
+- Verification fails open at every step: no verifier, load failure, or
+  inference error never eats a detection.
+- A refuted candidate is logged at debug level:
+  `Verifier refuted 'ева': score 0.12, cutoff 0.70, 43 ms`.
+- `pcm_history` keeps the last N seconds of raw audio in PSRAM. It is not yet
+  consumed by anything; it is the pre-roll source for the upcoming
+  pipeline-native Home Assistant verification stage (stage 3).
+
 ## Provenance & license
 
 `components/micro_wake_word/` derives from ESPHome's `micro_wake_word` component
