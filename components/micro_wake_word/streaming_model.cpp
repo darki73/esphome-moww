@@ -28,7 +28,18 @@ void VADModel::log_model_config() {
 bool StreamingModel::load_model_() {
   RAMAllocator<uint8_t> arena_allocator;
 
-  if (this->var_arena_ == nullptr) {
+  const tflite::Model *model = tflite::GetModel(this->model_start_);
+  if (model->version() != TFLITE_SCHEMA_VERSION) {
+    ESP_LOGE(TAG, "Streaming model's schema is not supported");
+    return false;
+  }
+
+  // Contract v2 models carry streaming state as explicit tensors: more than
+  // one subgraph input. They contain no resource-variable ops, so the
+  // variable arena is only needed for v1 models.
+  this->contract_v2_ = model->subgraphs()->Get(0)->inputs()->size() > 1;
+
+  if (!this->contract_v2_ && this->var_arena_ == nullptr) {
     this->var_arena_ = arena_allocator.allocate(STREAMING_MODEL_VARIABLE_ARENA_SIZE);
     if (this->var_arena_ == nullptr) {
       ESP_LOGE(TAG, "Could not allocate the streaming model's variable tensor arena.");
@@ -36,12 +47,6 @@ bool StreamingModel::load_model_() {
     }
     this->ma_ = tflite::MicroAllocator::Create(this->var_arena_, STREAMING_MODEL_VARIABLE_ARENA_SIZE);
     this->mrv_ = tflite::MicroResourceVariables::Create(this->ma_, 20);
-  }
-
-  const tflite::Model *model = tflite::GetModel(this->model_start_);
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    ESP_LOGE(TAG, "Streaming model's schema is not supported");
-    return false;
   }
 
   // Probe for the actual required tensor arena size if not yet determined
@@ -73,9 +78,19 @@ bool StreamingModel::load_model_() {
       return false;
     }
 
+    if (this->contract_v2_) {
+      if (!this->setup_v2_tensors_()) {
+        return false;
+      }
+    } else {
+      this->data_input_index_ = 0;
+      this->probability_output_index_ = 0;
+      this->state_pairs_.clear();
+    }
+
     // Verify input tensor matches expected values
     // Dimension 3 will represent the first layer stride, so skip it may vary
-    TfLiteTensor *input = this->interpreter_->input(0);
+    TfLiteTensor *input = this->interpreter_->input(this->data_input_index_);
     if ((input->dims->size != 3) || (input->dims->data[0] != 1) ||
         (input->dims->data[2] != PREPROCESSOR_FEATURE_SIZE)) {
       ESP_LOGE(TAG, "Streaming model tensor input dimensions has improper dimensions.");
@@ -88,14 +103,16 @@ bool StreamingModel::load_model_() {
     }
 
     // Verify output tensor matches expected values
-    TfLiteTensor *output = this->interpreter_->output(0);
+    TfLiteTensor *output = this->interpreter_->output(this->probability_output_index_);
     if ((output->dims->size != 2) || (output->dims->data[0] != 1) || (output->dims->data[1] != 1)) {
       ESP_LOGE(TAG, "Streaming model tensor output dimension is not 1x1.");
       return false;
     }
 
-    if (output->type != kTfLiteUInt8) {
-      ESP_LOGE(TAG, "Streaming model tensor output is not uint8.");
+    // v1 exports the probability as uint8, v2 as int8 (all v2 outputs share
+    // one type and the states must be int8); both are handled at read time
+    if (output->type != kTfLiteUInt8 && output->type != kTfLiteInt8) {
+      ESP_LOGE(TAG, "Streaming model tensor output is not uint8 or int8.");
       return false;
     }
   }
@@ -103,6 +120,80 @@ bool StreamingModel::load_model_() {
   this->loaded_ = true;
   this->reset_probabilities();
   return true;
+}
+
+void StreamingModel::recreate_resource_variables_() {
+  // v2 models never allocate the variable arena; nothing to recreate
+  if (this->var_arena_ == nullptr) {
+    return;
+  }
+  this->ma_ = tflite::MicroAllocator::Create(this->var_arena_, STREAMING_MODEL_VARIABLE_ARENA_SIZE);
+  this->mrv_ = tflite::MicroResourceVariables::Create(this->ma_, 20);
+}
+
+bool StreamingModel::setup_v2_tensors_() {
+  size_t input_count = this->interpreter_->inputs_size();
+  size_t output_count = this->interpreter_->outputs_size();
+  if (output_count != input_count) {
+    ESP_LOGE(TAG, "v2 model: %zu inputs but %zu outputs", input_count, output_count);
+    return false;
+  }
+
+  // The data input is the only 3-D tensor [1, stride, features]; every
+  // state input is 4-D. Subgraph order pairs state input i with output i+1
+  // (output 0 is the probability) — validated below.
+  this->data_input_index_ = -1;
+  this->state_pairs_.clear();
+  int state_output_index = 0;
+  for (size_t i = 0; i < input_count; i++) {
+    TfLiteTensor *input = this->interpreter_->input(i);
+    if (input->dims->size == 3) {
+      if (this->data_input_index_ != -1) {
+        ESP_LOGE(TAG, "v2 model has more than one data input");
+        return false;
+      }
+      this->data_input_index_ = i;
+      continue;
+    }
+    state_output_index++;
+    this->state_pairs_.emplace_back(i, state_output_index);
+  }
+  if (this->data_input_index_ == -1) {
+    ESP_LOGE(TAG, "v2 model has no [1, stride, features] data input");
+    return false;
+  }
+  this->probability_output_index_ = 0;
+
+  for (auto &pair : this->state_pairs_) {
+    TfLiteTensor *state_in = this->interpreter_->input(pair.first);
+    TfLiteTensor *state_out = this->interpreter_->output(pair.second);
+    if (state_in->type != kTfLiteInt8 || state_out->type != kTfLiteInt8) {
+      ESP_LOGE(TAG, "v2 state %d is not int8", pair.first);
+      return false;
+    }
+    if (state_in->bytes != state_out->bytes) {
+      ESP_LOGE(TAG, "v2 state %d: input %u bytes but output %u bytes", pair.first, (unsigned) state_in->bytes,
+               (unsigned) state_out->bytes);
+      return false;
+    }
+    // Matched quantization is what lets the raw bytes feed back losslessly
+    if (state_in->params.scale != state_out->params.scale ||
+        state_in->params.zero_point != state_out->params.zero_point) {
+      ESP_LOGE(TAG, "v2 state %d: input/output quantization differs", pair.first);
+      return false;
+    }
+  }
+
+  ESP_LOGD(TAG, "Contract v2 model: %zu state tensors", this->state_pairs_.size());
+  this->init_v2_states_();
+  return true;
+}
+
+void StreamingModel::init_v2_states_() {
+  for (auto &pair : this->state_pairs_) {
+    TfLiteTensor *state_in = this->interpreter_->input(pair.first);
+    std::memset(tflite::GetTensorData<int8_t>(state_in), (int8_t) state_in->params.zero_point, state_in->bytes);
+  }
 }
 
 size_t StreamingModel::probe_arena_size_() {
@@ -128,8 +219,7 @@ size_t StreamingModel::probe_arena_size_() {
     if (probe_interpreter->AllocateTensors() != kTfLiteOk) {
       probe_interpreter.reset();
       arena_allocator.deallocate(probe_arena, attempt_size);
-      this->ma_ = tflite::MicroAllocator::Create(this->var_arena_, STREAMING_MODEL_VARIABLE_ARENA_SIZE);
-      this->mrv_ = tflite::MicroResourceVariables::Create(this->ma_, 20);
+      this->recreate_resource_variables_();
       continue;
     }
 
@@ -137,8 +227,7 @@ size_t StreamingModel::probe_arena_size_() {
     // If that works, use it. Otherwise, try midpoints between that and the full size until one succeeds.
     size_t lower = (probe_interpreter->arena_used_bytes() + 16 + 15) & ~15;
     probe_interpreter.reset();
-    this->ma_ = tflite::MicroAllocator::Create(this->var_arena_, STREAMING_MODEL_VARIABLE_ARENA_SIZE);
-    this->mrv_ = tflite::MicroResourceVariables::Create(this->ma_, 20);
+    this->recreate_resource_variables_();
 
     size_t upper = attempt_size;
 
@@ -149,8 +238,7 @@ size_t StreamingModel::probe_arena_size_() {
       bool ok = test_interpreter->AllocateTensors() == kTfLiteOk;
 
       test_interpreter.reset();
-      this->ma_ = tflite::MicroAllocator::Create(this->var_arena_, STREAMING_MODEL_VARIABLE_ARENA_SIZE);
-      this->mrv_ = tflite::MicroResourceVariables::Create(this->ma_, 20);
+      this->recreate_resource_variables_();
 
       if (ok) {
         // Found a working size smaller than the full arena
@@ -202,9 +290,9 @@ bool StreamingModel::perform_streaming_inference(const int8_t features[PREPROCES
   }
 
   if (this->loaded_) {
-    TfLiteTensor *input = this->interpreter_->input(0);
+    TfLiteTensor *input = this->interpreter_->input(this->data_input_index_);
 
-    uint8_t stride = this->interpreter_->input(0)->dims->data[1];
+    uint8_t stride = input->dims->data[1];
     this->current_stride_step_ = this->current_stride_step_ % stride;
 
     std::memmove(
@@ -219,12 +307,22 @@ bool StreamingModel::perform_streaming_inference(const int8_t features[PREPROCES
         return false;
       }
 
-      TfLiteTensor *output = this->interpreter_->output(0);
+      TfLiteTensor *output = this->interpreter_->output(this->probability_output_index_);
+
+      // v2 streaming state: feed each state output back into its input.
+      // Quantization is validated identical at load, so raw bytes copy over.
+      for (auto &pair : this->state_pairs_) {
+        std::memcpy(tflite::GetTensorData<int8_t>(this->interpreter_->input(pair.first)),
+                    tflite::GetTensorData<int8_t>(this->interpreter_->output(pair.second)),
+                    this->interpreter_->input(pair.first)->bytes);
+      }
 
       ++this->last_n_index_;
       if (this->last_n_index_ == this->sliding_window_size_)
         this->last_n_index_ = 0;
-      this->recent_streaming_probabilities_[this->last_n_index_] = output->data.uint8[0];  // probability;
+      // v1 emits uint8, v2 emits int8 with zero point -128: same 0-255 scale
+      this->recent_streaming_probabilities_[this->last_n_index_] =
+          output->type == kTfLiteUInt8 ? output->data.uint8[0] : (uint8_t) (output->data.int8[0] + 128);
       this->unprocessed_probability_status_ = true;
     }
     if (this->recent_streaming_probabilities_[this->last_n_index_] < this->probability_cutoff_) {

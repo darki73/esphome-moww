@@ -120,6 +120,25 @@ select:
   consumed by anything; it is the pre-roll source for the upcoming
   pipeline-native Home Assistant verification stage (stage 3).
 
+### Model contracts
+
+The component loads two streaming-model formats, detected automatically from
+the flatbuffer:
+
+- **v1** (kahrendt/microWakeWord): streaming state lives in TFLite resource
+  variables inside the model (`VAR_HANDLE`/`READ_VARIABLE`/... ops). All
+  published models, including the Voice PE `stop` timer model, keep working.
+- **v2** (wakegen-native): state is explicit input/output tensor pairs —
+  `output_0` is the probability, output *i+1* pairs with the *i*-th state
+  input. The component validates each pair's dims and quantization at load,
+  initializes states to their quantized zero point, and feeds the raw int8
+  bytes back after every invoke (quantization parity makes that lossless).
+  v2 models need no resource-variable arena and no CallOnce/VarHandle ops.
+
+Detection rule: more than one subgraph input = v2. Everything above the
+loader (cutoffs, sliding window, verifier cascade, HA integration) is
+contract-agnostic.
+
 ## Provenance & license
 
 `components/micro_wake_word/` derives from ESPHome's `micro_wake_word` component

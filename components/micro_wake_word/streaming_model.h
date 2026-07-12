@@ -71,7 +71,26 @@ class StreamingModel {
   /// @brief Returns true if successfully registered the streaming model's TensorFlow operations
   bool register_streaming_ops_(tflite::MicroMutableOpResolver<20> &op_resolver);
 
+  /// @brief Identifies and validates contract-v2 tensors after allocation:
+  /// the data input, the probability output, and each state input/output
+  /// pair (dims and quantization must match). Initializes state buffers.
+  /// @return True if the model satisfies the v2 contract
+  bool setup_v2_tensors_();
+  /// @brief Fills every v2 state input with its quantized zero point
+  void init_v2_states_();
+  /// @brief Recreates the resource-variable allocator after a probe
+  /// interpreter is destroyed (no-op for v2 models, which have none)
+  void recreate_resource_variables_();
+
   tflite::MicroMutableOpResolver<20> streaming_op_resolver_;
+
+  // Contract v2 (wakegen-native models): streaming state is explicit input/
+  // output tensor pairs instead of resource variables. Detected from the
+  // flatbuffer (more than one subgraph input); v1 models are unaffected.
+  bool contract_v2_{false};
+  int data_input_index_{0};
+  int probability_output_index_{0};
+  std::vector<std::pair<int, int>> state_pairs_;  // (input index, output index)
 
   bool loaded_{false};
   bool enabled_{true};
