@@ -40,6 +40,7 @@ DOMAIN = "micro_wake_word"
 
 
 CONF_FEATURE_STEP_SIZE = "feature_step_size"
+CONF_MICRO_WAKE_WORD_ID = "micro_wake_word_id"
 CONF_MODELS = "models"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
 CONF_PCM_HISTORY = "pcm_history"

@@ -66,47 +66,36 @@ firmware, like the wake models themselves. Without the `verifier:` block the
 firmware is behaviorally identical to stock (verified: both variants compile;
 the cascade code is fully `#ifdef`-gated).
 
-### Dropdowns and toggles (interim, via template entities)
+### Dropdowns and toggles (native platforms)
 
-Native sub-platform entities are planned for the stage-3 phase. Until then the
-runtime API is fully controllable from template entities, the same pattern the
-stock Voice PE firmware uses for its sensitivity select
-(see `test/moww-test.yaml` for a compile-verified example):
+The component ships native `switch` and `select` platforms — flash-persisted,
+no lambdas (see `test/moww-test.yaml` for a compile-verified example):
 
 ```yaml
 switch:
-  - platform: template
+  - platform: micro_wake_word
+    type: verifier            # on-device verification on/off
     name: "On-device verification"
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - lambda: id(mww).get_verifier_model()->set_enabled(true);
-    turn_off_action:
-      - lambda: id(mww).get_verifier_model()->set_enabled(false);
+    # restore_mode: RESTORE_DEFAULT_ON (default)
 
 select:
-  - platform: template
+  - platform: micro_wake_word
+    type: sensitivity
     name: "Wake sensitivity"
-    optimistic: true
-    initial_option: "Balanced"
-    restore_value: true
-    entity_category: config
-    options: [Relaxed, Balanced, Paranoid]
-    on_value:
-      # Strictness is mostly the verifier's job; stage 1 stays greedy.
-      # Cutoffs are quantized: value = round(probability * 255).
-      lambda: |-
-        if (x == "Relaxed") {
-          id(my_wake_word).set_probability_cutoff(26);                 // stage-1 0.10
-          id(mww).get_verifier_model()->set_probability_cutoff(153);  // stage-2 0.60
-        } else if (x == "Balanced") {
-          id(my_wake_word).set_probability_cutoff(26);
-          id(mww).get_verifier_model()->set_probability_cutoff(178);  // 0.70
-        } else {
-          id(my_wake_word).set_probability_cutoff(43);                 // stage-1 0.17
-          id(mww).get_verifier_model()->set_probability_cutoff(204);  // 0.80
-        }
+    # presets: omitted -> Relaxed / Balanced / Paranoid defaults below.
+    # Each preset pairs a stage-1 cutoff (applied to every non-internal
+    # wake model) with a stage-2 verifier cutoff. Stage 1 stays greedy —
+    # it exists to never miss; strictness is the verifier's job.
+    # presets:
+    #   Relaxed:  { probability_cutoff: 0.10, verifier_cutoff: 0.60 }
+    #   Balanced: { probability_cutoff: 0.10, verifier_cutoff: 0.70 }
+    #   Paranoid: { probability_cutoff: 0.17, verifier_cutoff: 0.80 }
+    # initial_option: Balanced
 ```
+
+The verifier switch requires a `verifier:` model in `micro_wake_word:` (the
+config is rejected otherwise). The select's chosen preset and the switch
+state survive reboots via ESP preferences.
 
 ### Notes
 
