@@ -87,9 +87,11 @@ select:
     # wake model) with a stage-2 verifier cutoff. Stage 1 stays greedy —
     # it exists to never miss; strictness is the verifier's job.
     # presets:
-    #   Relaxed:  { probability_cutoff: 0.10, verifier_cutoff: 0.60 }
-    #   Balanced: { probability_cutoff: 0.10, verifier_cutoff: 0.70 }
-    #   Paranoid: { probability_cutoff: 0.17, verifier_cutoff: 0.80 }
+    # (verifier cutoffs measured on real hardware: decoys score 0.00-0.01,
+    # ambient junk <=0.12, genuine wake word 0.21+ at conversational voice)
+    #   Relaxed:  { probability_cutoff: 0.10, verifier_cutoff: 0.10 }
+    #   Balanced: { probability_cutoff: 0.10, verifier_cutoff: 0.15 }
+    #   Paranoid: { probability_cutoff: 0.17, verifier_cutoff: 0.25 }
     # initial_option: Balanced
 ```
 

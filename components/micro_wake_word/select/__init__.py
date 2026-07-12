@@ -44,12 +44,15 @@ _PRESET_SCHEMA = cv.Schema(
     }
 )
 
-# Cutoffs from the eva fleet tuning: stage 1 stays greedy (it exists to
-# never miss), strictness is the verifier's job.
+# Cutoffs measured on real hardware (Voice PE, room mic, 2026-07-12):
+# one-shot verifier scores — decoys/«нефть» 0.00-0.01, ambient junk <=0.12,
+# genuine wake word at conversational voice 0.21-0.50, loud 0.76. Stage 1
+# stays greedy (it exists to never miss); the verifier cutoff sits in the
+# measured corridor between junk and normal speech.
 _DEFAULT_PRESETS = {
-    "Relaxed": {CONF_PROBABILITY_CUTOFF: 0.10, CONF_VERIFIER_CUTOFF: 0.60},
-    "Balanced": {CONF_PROBABILITY_CUTOFF: 0.10, CONF_VERIFIER_CUTOFF: 0.70},
-    "Paranoid": {CONF_PROBABILITY_CUTOFF: 0.17, CONF_VERIFIER_CUTOFF: 0.80},
+    "Relaxed": {CONF_PROBABILITY_CUTOFF: 0.10, CONF_VERIFIER_CUTOFF: 0.10},
+    "Balanced": {CONF_PROBABILITY_CUTOFF: 0.10, CONF_VERIFIER_CUTOFF: 0.15},
+    "Paranoid": {CONF_PROBABILITY_CUTOFF: 0.17, CONF_VERIFIER_CUTOFF: 0.25},
 }
 
 
