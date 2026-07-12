@@ -373,7 +373,19 @@ void MicroWakeWord::loop() {
       DetectionEvent detection_event;
       while (xQueueReceive(this->detection_queue_, &detection_event, 0)) {
         if (detection_event.blocked_by_vad) {
-          ESP_LOGD(TAG, "Wake word model predicts '%s', but VAD model doesn't.", detection_event.wake_word->c_str());
+          // At the greedy stage-1 cutoff this fires in long bursts; log at
+          // most one line per burst window
+          static uint32_t last_vad_log = 0;
+          static uint16_t vad_blocked_since = 0;
+          const uint32_t now = millis();
+          if (now - last_vad_log >= 3000) {
+            ESP_LOGD(TAG, "Wake word model predicts '%s', but VAD model doesn't. (%u more blocked in last 3 s)",
+                     detection_event.wake_word->c_str(), vad_blocked_since);
+            last_vad_log = now;
+            vad_blocked_since = 0;
+          } else {
+            vad_blocked_since++;
+          }
         } else {
           constexpr float uint8_to_float_divisor =
               255.0f;  // Converting a quantized uint8 probability to floating point
@@ -606,17 +618,22 @@ void MicroWakeWord::store_feature_history_(const int8_t features[PREPROCESSOR_FE
 }
 
 void MicroWakeWord::tick_pending_verification_() {
-  // Scoring points after the stage-1 candidate, in feature frames (10 ms
-  // each): the on-device sweep showed completed-word windows peak roughly
-  // 100-300 ms after the greedy detection
-  static const uint16_t FIRST_SCORE_FRAMES = 15;
-  static const uint16_t SECOND_SCORE_FRAMES = 30;
+  // Scoring band after the stage-1 candidate, in feature frames (10 ms
+  // each). The verifier only scores well once the completed word has fully
+  // entered the feature history (~100-150 ms past the word end), and the
+  // word end is voice-dependent: loud fast delivery finishes ~100-300 ms
+  // after the greedy detection, quiet slow delivery needs 300-500 ms. Scan
+  // the whole band and exit early on the first confirming window.
+  static const uint16_t FIRST_SCORE_FRAMES = 10;
+  static const uint16_t LAST_SCORE_FRAMES = 50;
+  static const uint16_t SCORE_STRIDE_FRAMES = 5;
 
   if (!this->verify_pending_) {
     return;
   }
   this->verify_frames_waited_++;
-  if (this->verify_frames_waited_ != FIRST_SCORE_FRAMES && this->verify_frames_waited_ != SECOND_SCORE_FRAMES) {
+  if (this->verify_frames_waited_ < FIRST_SCORE_FRAMES ||
+      (this->verify_frames_waited_ % SCORE_STRIDE_FRAMES) != 0) {
     return;
   }
 
@@ -625,12 +642,16 @@ void MicroWakeWord::tick_pending_verification_() {
 
   if (scored.detected) {
     // Early exit on the first scoring point that confirms
+    ESP_LOGD(TAG, "Verifier confirmed '%s': score %.2f, cutoff %.2f, +%u ms after candidate",
+             scored.wake_word->c_str(), scored.verifier_score / 255.0f,
+             this->verifier_model_->get_probability_cutoff() / 255.0f,
+             (unsigned) this->verify_frames_waited_ * 10);
     this->verify_pending_ = false;
     xQueueSend(this->detection_queue_, &scored, portMAX_DELAY);
     App.wake_loop_threadsafe();
     return;
   }
-  if (this->verify_frames_waited_ >= SECOND_SCORE_FRAMES) {
+  if (this->verify_frames_waited_ >= LAST_SCORE_FRAMES) {
     ESP_LOGD(TAG, "Verifier refuted '%s': best score %.2f across delays, cutoff %.2f",
              this->pending_verify_event_.wake_word->c_str(), this->verify_best_score_ / 255.0f,
              this->verifier_model_->get_probability_cutoff() / 255.0f);
@@ -673,7 +694,9 @@ DetectionEvent MicroWakeWord::run_verifier_(const DetectionEvent &event) {
   const uint8_t cutoff = this->verifier_model_->get_probability_cutoff();
   result.detected = result.verifier_score >= cutoff;
 
-  ESP_LOGD(TAG, "Verifier %s '%s': score %.2f, cutoff %.2f, %" PRIu32 " ms",
+  // Per-probe outcome is verbose; the deferral tick logs the debug-level
+  // confirm (with delay) and the best-across-delays refute summary
+  ESP_LOGV(TAG, "Verifier %s '%s': score %.2f, cutoff %.2f, %" PRIu32 " ms",
            result.detected ? "confirmed" : "refuted", event.wake_word->c_str(), result.verifier_score / 255.0f,
            cutoff / 255.0f, millis() - start_time);
 
