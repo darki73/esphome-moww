@@ -479,6 +479,10 @@ void MicroWakeWord::process_probabilities_() {
   this->vad_state_ = vad_state.detected;  // atomic write, so thread safe
 #endif
 
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+  this->tick_pending_verification_();
+#endif
+
   for (auto &model : this->wake_word_models_) {
     if (model->get_unprocessed_probability_status()) {
       // Only detect wake words if there is a new probability since the last check
@@ -489,9 +493,15 @@ void MicroWakeWord::process_probabilities_() {
 #endif
 #ifdef USE_MICRO_WAKE_WORD_VERIFIER
           if ((this->verifier_model_ != nullptr) && this->verifier_model_->is_enabled()) {
-            wake_word_state = this->run_verifier_(wake_word_state);
-          }
-          if (wake_word_state.detected) {
+            // Defer: stage 1 fires mid-word; the verifier scores once the
+            // word's tail has entered the feature history (see tick below)
+            if (!this->verify_pending_) {
+              this->pending_verify_event_ = wake_word_state;
+              this->verify_pending_ = true;
+              this->verify_frames_waited_ = 0;
+              this->verify_best_score_ = -1;
+            }
+          } else {
             xQueueSend(this->detection_queue_, &wake_word_state, portMAX_DELAY);
 
             // Wake main loop immediately to process wake word detection
@@ -593,6 +603,39 @@ void MicroWakeWord::store_feature_history_(const int8_t features[PREPROCESSOR_FE
               PREPROCESSOR_FEATURE_SIZE);
   this->feature_history_next_ = (this->feature_history_next_ + 1) % this->feature_history_capacity_;
   this->feature_history_count_ = std::min(this->feature_history_count_ + 1, this->feature_history_capacity_);
+}
+
+void MicroWakeWord::tick_pending_verification_() {
+  // Scoring points after the stage-1 candidate, in feature frames (10 ms
+  // each): the on-device sweep showed completed-word windows peak roughly
+  // 100-300 ms after the greedy detection
+  static const uint16_t FIRST_SCORE_FRAMES = 15;
+  static const uint16_t SECOND_SCORE_FRAMES = 30;
+
+  if (!this->verify_pending_) {
+    return;
+  }
+  this->verify_frames_waited_++;
+  if (this->verify_frames_waited_ != FIRST_SCORE_FRAMES && this->verify_frames_waited_ != SECOND_SCORE_FRAMES) {
+    return;
+  }
+
+  DetectionEvent scored = this->run_verifier_(this->pending_verify_event_);
+  this->verify_best_score_ = std::max(this->verify_best_score_, (int) scored.verifier_score);
+
+  if (scored.detected) {
+    // Early exit on the first scoring point that confirms
+    this->verify_pending_ = false;
+    xQueueSend(this->detection_queue_, &scored, portMAX_DELAY);
+    App.wake_loop_threadsafe();
+    return;
+  }
+  if (this->verify_frames_waited_ >= SECOND_SCORE_FRAMES) {
+    ESP_LOGD(TAG, "Verifier refuted '%s': best score %.2f across delays, cutoff %.2f",
+             this->pending_verify_event_.wake_word->c_str(), this->verify_best_score_ / 255.0f,
+             this->verifier_model_->get_probability_cutoff() / 255.0f);
+    this->verify_pending_ = false;
+  }
 }
 
 DetectionEvent MicroWakeWord::run_verifier_(const DetectionEvent &event) {

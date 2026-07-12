@@ -173,6 +173,22 @@ class MicroWakeWord : public Component
   /// @brief Re-scores the candidate with the one-shot verifier model. Runs on the inference task.
   /// Fails open: if the verifier is unavailable or errors, the event is returned unchanged.
   DetectionEvent run_verifier_(const DetectionEvent &event);
+
+  // Deferred verification: stage 1 is greedy and fires while the wake word
+  // is still being spoken, but the verifier is trained on windows where the
+  // word has COMPLETED (measured on-device: mid-word windows score ~0.12,
+  // completed windows 0.7+). A candidate therefore waits until the word's
+  // tail is in the feature history: scored twice, ~150 ms and ~300 ms after
+  // the candidate, early-exiting on the first confirmation.
+  DetectionEvent pending_verify_event_{};
+  bool verify_pending_{false};
+  uint16_t verify_frames_waited_{0};
+  int verify_best_score_{-1};
+
+  /// @brief Advances a pending deferred verification by one feature frame;
+  /// enqueues the detection when a scoring point confirms it. Runs on the
+  /// inference task, once per generated feature.
+  void tick_pending_verification_();
 #endif
 
 #ifdef USE_MICRO_WAKE_WORD_PCM_HISTORY
