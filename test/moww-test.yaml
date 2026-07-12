@@ -1,0 +1,50 @@
+esphome:
+  name: moww-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+i2s_audio:
+  i2s_lrclk_pin: GPIO5
+  i2s_bclk_pin: GPIO6
+
+microphone:
+  - platform: i2s_audio
+    id: mic
+    adc_type: external
+    i2s_din_pin: GPIO7
+    pdm: false
+    sample_rate: 16000
+
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: mic
+    channels: 0
+  models:
+    - model: okay_nabu
+      id: okay_nabu
+  vad:
+  pcm_history:
+    duration: 3s
+  verifier:
+    model: verifier_placeholder.tflite
+    probability_cutoff: 0.7
+    tensor_arena_size: 300000
+  on_wake_word_detected:
+    - logger.log:
+        format: "wake word %s"
+        args: ["wake_word.c_str()"]
