@@ -13,6 +13,10 @@
 #include "esphome/components/ota/ota_backend.h"
 #endif
 
+#include <algorithm>
+#include <cinttypes>
+#include <cstring>
+
 namespace esphome::micro_wake_word {
 
 static const char *const TAG = "micro_wake_word";
@@ -21,7 +25,9 @@ static const ssize_t DETECTION_QUEUE_LENGTH = 5;
 
 static const size_t DATA_TIMEOUT_MS = 50;
 
-static const uint32_t RING_BUFFER_DURATION_MS = 120;
+// Upstream uses 120 ms. The one-shot verifier runs inline on the inference task and stalls feature
+// generation for the duration of its invoke; a larger transport buffer absorbs that stall losslessly.
+static const uint32_t RING_BUFFER_DURATION_MS = 500;
 
 #ifdef CONFIG_IDF_TARGET_ESP32P4
 // ESP32-P4 PIE-optimized esp-nn kernels (e.g. depthwise_conv_s8_ch1_pie) require
@@ -109,10 +115,30 @@ void MicroWakeWord::setup() {
     return;
   }
 
+#ifdef USE_MICRO_WAKE_WORD_PCM_HISTORY
+  {
+    // Raw audio history for verification pre-roll. Allocated once; PSRAM only, so a failure
+    // degrades to no history instead of eating into internal heap.
+    const size_t samples = (16000 * static_cast<size_t>(this->pcm_history_duration_ms_)) / 1000;
+    RAMAllocator<int16_t> history_allocator(RAMAllocator<int16_t>::ALLOC_EXTERNAL);
+    this->pcm_history_ = history_allocator.allocate(samples);
+    if (this->pcm_history_ == nullptr) {
+      ESP_LOGW(TAG, "Failed to allocate PCM history in external RAM; audio history disabled");
+    } else {
+      this->pcm_history_capacity_ = samples;
+    }
+  }
+#endif
+
   this->microphone_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
     if (this->state_ == State::STOPPED) {
       return;
     }
+#ifdef USE_MICRO_WAKE_WORD_PCM_HISTORY
+    if (this->pcm_history_ != nullptr) {
+      this->write_pcm_history_(data.data(), data.size());
+    }
+#endif
     std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
     if (this->ring_buffer_.use_count() > 1) {
       // Producer-only write: never touches consumer state. If the buffer is full, ask the inference task
@@ -171,6 +197,15 @@ void MicroWakeWord::inference_task(void *params) {
       }
     }
 
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+    if (!(xEventGroupGetBits(this_mww->event_group_) & ERROR_BITS) && (this_mww->verifier_model_ != nullptr)) {
+      // Load up front so the model's window size is known and the first candidate verifies without a load hiccup
+      if (!this_mww->verifier_model_->load_model() || !this_mww->allocate_verifier_buffers_()) {
+        xEventGroupSetBits(this_mww->event_group_, EventGroupBits::ERROR_MEMORY);
+      }
+    }
+#endif
+
     if (!(xEventGroupGetBits(this_mww->event_group_) & ERROR_BITS)) {
       this_mww->microphone_source_->start();
       xEventGroupSetBits(this_mww->event_group_, EventGroupBits::TASK_RUNNING);
@@ -197,6 +232,11 @@ void MicroWakeWord::inference_task(void *params) {
           audio_source->consume(processed_samples * sizeof(int16_t));
 
           if (feature_generated) {
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+            if (this_mww->feature_history_ != nullptr) {
+              this_mww->store_feature_history_(features_buffer);
+            }
+#endif
             if (!this_mww->update_model_probabilities_(features_buffer)) {
               xEventGroupSetBits(this_mww->event_group_, EventGroupBits::ERROR_INFERENCE);
               break;
@@ -213,6 +253,12 @@ void MicroWakeWord::inference_task(void *params) {
   xEventGroupSetBits(this_mww->event_group_, EventGroupBits::TASK_STOPPING);
 
   this_mww->unload_models_();
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+  if (this_mww->verifier_model_ != nullptr) {
+    this_mww->verifier_model_->unload_model();
+  }
+  this_mww->free_verifier_buffers_();
+#endif
   this_mww->microphone_source_->stop();
   FrontendFreeStateContents(&this_mww->frontend_state_);
 
@@ -441,12 +487,27 @@ void MicroWakeWord::process_probabilities_() {
 #ifdef USE_MICRO_WAKE_WORD_VAD
         if (vad_state.detected) {
 #endif
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+          if ((this->verifier_model_ != nullptr) && this->verifier_model_->is_enabled()) {
+            wake_word_state = this->run_verifier_(wake_word_state);
+          }
+          if (wake_word_state.detected) {
+            xQueueSend(this->detection_queue_, &wake_word_state, portMAX_DELAY);
+
+            // Wake main loop immediately to process wake word detection
+            App.wake_loop_threadsafe();
+          }
+          // Cool off after any candidate, verified or refuted, so a refuted utterance can't
+          // immediately re-fire on the same trailing audio
+          model->reset_probabilities();
+#else
           xQueueSend(this->detection_queue_, &wake_word_state, portMAX_DELAY);
 
           // Wake main loop immediately to process wake word detection
           App.wake_loop_threadsafe();
 
           model->reset_probabilities();
+#endif
 #ifdef USE_MICRO_WAKE_WORD_VAD
         } else {
           wake_word_state.blocked_by_vad = true;
@@ -480,6 +541,150 @@ bool MicroWakeWord::update_model_probabilities_(const int8_t audio_features[PREP
 
   return success;
 }
+
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+bool MicroWakeWord::allocate_verifier_buffers_() {
+  const size_t window = this->verifier_model_->get_window_frames();
+  if (window == 0) {
+    return false;
+  }
+
+  // Keep a modest margin beyond the model's window so a candidate reported a few frames
+  // late still has its full window available
+  this->feature_history_capacity_ = window + 16;
+
+  RAMAllocator<int8_t> allocator;
+  if (this->feature_history_ == nullptr) {
+    this->feature_history_ = allocator.allocate(this->feature_history_capacity_ * PREPROCESSOR_FEATURE_SIZE);
+  }
+  if (this->verifier_input_ == nullptr) {
+    this->verifier_input_ = allocator.allocate(window * PREPROCESSOR_FEATURE_SIZE);
+    this->verifier_input_frames_ = window;
+  }
+  if ((this->feature_history_ == nullptr) || (this->verifier_input_ == nullptr)) {
+    ESP_LOGE(TAG, "Failed to allocate verifier feature buffers");
+    this->free_verifier_buffers_();
+    return false;
+  }
+
+  this->feature_history_next_ = 0;
+  this->feature_history_count_ = 0;
+  return true;
+}
+
+void MicroWakeWord::free_verifier_buffers_() {
+  RAMAllocator<int8_t> allocator;
+  if (this->feature_history_ != nullptr) {
+    allocator.deallocate(this->feature_history_, this->feature_history_capacity_ * PREPROCESSOR_FEATURE_SIZE);
+    this->feature_history_ = nullptr;
+  }
+  if (this->verifier_input_ != nullptr) {
+    allocator.deallocate(this->verifier_input_, this->verifier_input_frames_ * PREPROCESSOR_FEATURE_SIZE);
+    this->verifier_input_ = nullptr;
+    this->verifier_input_frames_ = 0;
+  }
+  this->feature_history_capacity_ = 0;
+  this->feature_history_next_ = 0;
+  this->feature_history_count_ = 0;
+}
+
+void MicroWakeWord::store_feature_history_(const int8_t features[PREPROCESSOR_FEATURE_SIZE]) {
+  std::memcpy(&this->feature_history_[this->feature_history_next_ * PREPROCESSOR_FEATURE_SIZE], features,
+              PREPROCESSOR_FEATURE_SIZE);
+  this->feature_history_next_ = (this->feature_history_next_ + 1) % this->feature_history_capacity_;
+  this->feature_history_count_ = std::min(this->feature_history_count_ + 1, this->feature_history_capacity_);
+}
+
+DetectionEvent MicroWakeWord::run_verifier_(const DetectionEvent &event) {
+  DetectionEvent result = event;
+
+  // Fail open: a missing or errored verifier must never eat a detection
+  if (!this->verifier_model_->is_loaded() || (this->verifier_input_ == nullptr)) {
+    return result;
+  }
+
+  const size_t window = this->verifier_model_->get_window_frames();
+  const size_t available = std::min(this->feature_history_count_, window);
+  const size_t pad = window - available;
+
+  // Assemble a contiguous window ending at the newest frame. If detection fired before the
+  // history filled (right after start), pad the front with silence-level features.
+  if (pad > 0) {
+    std::memset(this->verifier_input_, -128, pad * PREPROCESSOR_FEATURE_SIZE);
+  }
+  size_t start_frame =
+      (this->feature_history_next_ + this->feature_history_capacity_ - available) % this->feature_history_capacity_;
+  for (size_t i = 0; i < available; ++i) {
+    size_t src_frame = (start_frame + i) % this->feature_history_capacity_;
+    std::memcpy(&this->verifier_input_[(pad + i) * PREPROCESSOR_FEATURE_SIZE],
+                &this->feature_history_[src_frame * PREPROCESSOR_FEATURE_SIZE], PREPROCESSOR_FEATURE_SIZE);
+  }
+
+  const uint32_t start_time = millis();
+  int score = this->verifier_model_->score(this->verifier_input_);
+  if (score < 0) {
+    return result;  // Fail open on inference error
+  }
+
+  result.verifier_score = static_cast<uint8_t>(score);
+  const uint8_t cutoff = this->verifier_model_->get_probability_cutoff();
+  result.detected = result.verifier_score >= cutoff;
+
+  ESP_LOGD(TAG, "Verifier %s '%s': score %.2f, cutoff %.2f, %" PRIu32 " ms",
+           result.detected ? "confirmed" : "refuted", event.wake_word->c_str(), result.verifier_score / 255.0f,
+           cutoff / 255.0f, millis() - start_time);
+
+  return result;
+}
+#endif  // USE_MICRO_WAKE_WORD_VERIFIER
+
+#ifdef USE_MICRO_WAKE_WORD_PCM_HISTORY
+void MicroWakeWord::write_pcm_history_(const uint8_t *data, size_t len) {
+  const int16_t *samples = reinterpret_cast<const int16_t *>(data);
+  size_t sample_count = len / sizeof(int16_t);
+
+  // If a chunk somehow exceeds the whole buffer, keep only its newest samples
+  if (sample_count > this->pcm_history_capacity_) {
+    samples += sample_count - this->pcm_history_capacity_;
+    sample_count = this->pcm_history_capacity_;
+  }
+
+  size_t next = this->pcm_history_next_;
+  const size_t first_segment = std::min(sample_count, this->pcm_history_capacity_ - next);
+  std::memcpy(&this->pcm_history_[next], samples, first_segment * sizeof(int16_t));
+  if (sample_count > first_segment) {
+    std::memcpy(&this->pcm_history_[0], samples + first_segment, (sample_count - first_segment) * sizeof(int16_t));
+  }
+
+  next = (next + sample_count) % this->pcm_history_capacity_;
+  if (!this->pcm_history_full_ && ((this->pcm_history_next_ + sample_count) >= this->pcm_history_capacity_)) {
+    this->pcm_history_full_ = true;
+  }
+  this->pcm_history_next_ = next;
+}
+
+size_t MicroWakeWord::copy_pcm_history(int16_t *dst, size_t max_samples) {
+  if (this->pcm_history_ == nullptr) {
+    return 0;
+  }
+
+  // Snapshot the write index; the producer may advance while we copy, which can tear a few
+  // samples at the oldest edge of the window. Those are the least relevant samples, so this
+  // is acceptable for verification pre-roll purposes.
+  const size_t next = this->pcm_history_next_;
+  const size_t stored = this->pcm_history_full_ ? this->pcm_history_capacity_ : next;
+  const size_t count = std::min(stored, max_samples);
+
+  const size_t start = (next + this->pcm_history_capacity_ - count) % this->pcm_history_capacity_;
+  const size_t first_segment = std::min(count, this->pcm_history_capacity_ - start);
+  std::memcpy(dst, &this->pcm_history_[start], first_segment * sizeof(int16_t));
+  if (count > first_segment) {
+    std::memcpy(dst + first_segment, &this->pcm_history_[0], (count - first_segment) * sizeof(int16_t));
+  }
+
+  return count;
+}
+#endif  // USE_MICRO_WAKE_WORD_PCM_HISTORY
 
 }  // namespace esphome::micro_wake_word
 

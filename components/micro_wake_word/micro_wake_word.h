@@ -4,6 +4,7 @@
 
 #include "preprocessor_settings.h"
 #include "streaming_model.h"
+#include "verifier_model.h"  // Self-guarded on USE_MICRO_WAKE_WORD_VERIFIER
 
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/components/ring_buffer/ring_buffer.h"
@@ -78,6 +79,19 @@ class MicroWakeWord : public Component
   // Since these are pointers to the WakeWordModel objects, the voice assistant component can enable or disable them
   std::vector<WakeWordModel *> get_wake_words();
 
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+  void set_verifier_model(VerifierModel *verifier_model) { this->verifier_model_ = verifier_model; }
+  VerifierModel *get_verifier_model() { return this->verifier_model_; }
+#endif
+
+#ifdef USE_MICRO_WAKE_WORD_PCM_HISTORY
+  void set_pcm_history_duration(uint32_t duration_ms) { this->pcm_history_duration_ms_ = duration_ms; }
+
+  /// @brief Copies up to max_samples of the most recent audio history into dst, oldest sample first.
+  /// @return The number of samples copied
+  size_t copy_pcm_history(int16_t *dst, size_t max_samples);
+#endif
+
  protected:
   microphone::MicrophoneSource *microphone_source_{nullptr};
   Trigger<std::string> wake_word_detected_trigger_;
@@ -135,6 +149,42 @@ class MicroWakeWord : public Component
   /// @brief Processes any new probabilities for each model. If any wake word is detected, it will send a DetectionEvent
   /// to the detection_queue_.
   void process_probabilities_();
+
+#ifdef USE_MICRO_WAKE_WORD_VERIFIER
+  VerifierModel *verifier_model_{nullptr};
+
+  // Rolling history of the most recent spectrogram features; written only by the inference task
+  int8_t *feature_history_{nullptr};
+  size_t feature_history_capacity_{0};  // frames
+  size_t feature_history_next_{0};
+  size_t feature_history_count_{0};
+
+  // Scratch buffer holding the contiguous window handed to the verifier
+  int8_t *verifier_input_{nullptr};
+  size_t verifier_input_frames_{0};  // Allocation size, kept separately so freeing never depends on model state
+
+  /// @brief Appends one feature frame to the rolling history. Runs on the inference task.
+  void store_feature_history_(const int8_t features[PREPROCESSOR_FEATURE_SIZE]);
+
+  /// @brief Allocates the feature history and scratch buffers; requires a loaded verifier model.
+  bool allocate_verifier_buffers_();
+  void free_verifier_buffers_();
+
+  /// @brief Re-scores the candidate with the one-shot verifier model. Runs on the inference task.
+  /// Fails open: if the verifier is unavailable or errors, the event is returned unchanged.
+  DetectionEvent run_verifier_(const DetectionEvent &event);
+#endif
+
+#ifdef USE_MICRO_WAKE_WORD_PCM_HISTORY
+  // Rolling history of raw audio for network verification pre-roll; written by the microphone data callback
+  int16_t *pcm_history_{nullptr};
+  size_t pcm_history_capacity_{0};  // samples
+  volatile size_t pcm_history_next_{0};
+  volatile bool pcm_history_full_{false};
+  uint32_t pcm_history_duration_ms_{3000};
+
+  void write_pcm_history_(const uint8_t *data, size_t len);
+#endif
 
   /// @brief Deletes each model's TFLite interpreters and frees tensor arena memory.
   void unload_models_();

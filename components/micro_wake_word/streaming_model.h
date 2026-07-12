@@ -23,6 +23,8 @@ struct DetectionEvent {
   uint8_t max_probability;
   uint8_t average_probability;
   bool blocked_by_vad = false;
+  // Quantized score assigned by the one-shot verifier model, if one ran for this event
+  uint8_t verifier_score = 0;
 };
 
 class StreamingModel {

@@ -10,6 +10,7 @@ import esphome.codegen as cg
 from esphome.components import esp32, microphone, ota, psram
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_DURATION,
     CONF_FILE,
     CONF_ID,
     CONF_INTERNAL,
@@ -41,12 +42,14 @@ DOMAIN = "micro_wake_word"
 CONF_FEATURE_STEP_SIZE = "feature_step_size"
 CONF_MODELS = "models"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
+CONF_PCM_HISTORY = "pcm_history"
 CONF_PROBABILITY_CUTOFF = "probability_cutoff"
 CONF_SLIDING_WINDOW_AVERAGE_SIZE = "sliding_window_average_size"
 CONF_SLIDING_WINDOW_SIZE = "sliding_window_size"
 CONF_STOP_AFTER_DETECTION = "stop_after_detection"
 CONF_TENSOR_ARENA_SIZE = "tensor_arena_size"
 CONF_VAD = "vad"
+CONF_VERIFIER = "verifier"
 
 TYPE_HTTP = "http"
 
@@ -67,6 +70,7 @@ IsRunningCondition = micro_wake_word_ns.class_(
 )
 
 WakeWordModel = micro_wake_word_ns.class_("WakeWordModel")
+VerifierModel = micro_wake_word_ns.class_("VerifierModel")
 
 
 def _validate_json_filename(value):
@@ -339,6 +343,51 @@ def _maybe_empty_vad_schema(value):
     return VAD_MODEL_SCHEMA(value)
 
 
+def _validate_verifier_source(value):
+    """Validates a raw (non-streaming) tflite model source: local path or http(s) url."""
+    value = cv.string_strict(value)
+    if value.startswith("http://") or value.startswith("https://"):
+        cv.url(value)
+        path = _compute_local_file_path({CONF_URL: value}) / "verifier.tflite"
+        external_files.download_content(value, path)
+        return {CONF_TYPE: TYPE_HTTP, CONF_URL: value}
+    return {CONF_TYPE: TYPE_LOCAL, CONF_PATH: cv.file_(value)}
+
+
+def _verifier_model_bytes(source_config) -> bytes:
+    if source_config[CONF_TYPE] == TYPE_HTTP:
+        file = _compute_local_file_path({CONF_URL: source_config[CONF_URL]}) / "verifier.tflite"
+    else:
+        file = Path(source_config[CONF_PATH])
+    return file.read_bytes()
+
+
+VERIFIER_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(CONF_ID): cv.declare_id(VerifierModel),
+        cv.Required(CONF_MODEL): _validate_verifier_source,
+        cv.Optional(CONF_PROBABILITY_CUTOFF, default=0.7): cv.percentage,
+        cv.Optional(CONF_TENSOR_ARENA_SIZE, default=300000): cv.positive_int,
+        cv.GenerateID(CONF_RAW_DATA_ID): cv.declare_id(cg.uint8),
+    }
+)
+
+PCM_HISTORY_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_DURATION, default="3s"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(seconds=1), max=cv.TimePeriod(seconds=8)),
+        ),
+    }
+)
+
+
+def _maybe_empty_pcm_history_schema(value):
+    if value is None:
+        value = {}
+    return PCM_HISTORY_SCHEMA(value)
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -358,6 +407,8 @@ CONFIG_SCHEMA = cv.All(
                 single=True
             ),
             cv.Optional(CONF_VAD): _maybe_empty_vad_schema,
+            cv.Optional(CONF_VERIFIER): VERIFIER_SCHEMA,
+            cv.Optional(CONF_PCM_HISTORY): _maybe_empty_pcm_history_schema,
             cv.Optional(CONF_STOP_AFTER_DETECTION, default=True): cv.boolean,
             cv.Optional(CONF_TASK_STACK_IN_PSRAM): psram.validate_task_stack_in_psram,
             cv.Optional(CONF_MODEL): cv.invalid(
@@ -522,6 +573,30 @@ async def to_code(config):
 
     cg.add(var.set_features_step_size(manifest[KEY_MICRO][CONF_FEATURE_STEP_SIZE]))
     cg.add(var.set_stop_after_detection(config[CONF_STOP_AFTER_DETECTION]))
+
+    if verifier_config := config.get(CONF_VERIFIER):
+        cg.add_define("USE_MICRO_WAKE_WORD_VERIFIER")
+
+        data = _verifier_model_bytes(verifier_config[CONF_MODEL])
+        rhs = [HexInt(x) for x in data]
+        prog_arr = cg.progmem_array(verifier_config[CONF_RAW_DATA_ID], rhs)
+
+        quantized_cutoff = int(verifier_config[CONF_PROBABILITY_CUTOFF] * 255)
+        verifier = cg.new_Pvariable(
+            verifier_config[CONF_ID],
+            prog_arr,
+            quantized_cutoff,
+            verifier_config[CONF_TENSOR_ARENA_SIZE],
+        )
+        cg.add(var.set_verifier_model(verifier))
+
+    if pcm_history_config := config.get(CONF_PCM_HISTORY):
+        cg.add_define("USE_MICRO_WAKE_WORD_PCM_HISTORY")
+        cg.add(
+            var.set_pcm_history_duration(
+                pcm_history_config[CONF_DURATION].total_milliseconds
+            )
+        )
 
     if on_wake_word_detection_config := config.get(CONF_ON_WAKE_WORD_DETECTED):
         await automation.build_automation(
