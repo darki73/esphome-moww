@@ -28,9 +28,12 @@ bool VerifierModel::load_model() {
     return true;
   }
 
-  if (!this->register_ops_(this->op_resolver_)) {
-    ESP_LOGE(TAG, "Failed to register the verifier model's TensorFlow operations");
-    return false;
+  if (!this->ops_registered_) {
+    if (!this->register_ops_(this->op_resolver_)) {
+      ESP_LOGE(TAG, "Failed to register the verifier model's TensorFlow operations");
+      return false;
+    }
+    this->ops_registered_ = true;
   }
 
   const tflite::Model *model = tflite::GetModel(this->model_start_);
@@ -133,7 +136,7 @@ int VerifierModel::score(const int8_t *features) {
   return static_cast<int>(output->data.int8[0]) + 128;
 }
 
-bool VerifierModel::register_ops_(tflite::MicroMutableOpResolver<17> &op_resolver) {
+bool VerifierModel::register_ops_(tflite::MicroMutableOpResolver<18> &op_resolver) {
   // The non-streaming export uses the streaming model's op set minus the
   // resource-variable streaming ops (CallOnce, VarHandle, ReadVariable, AssignVariable)
   if (op_resolver.AddReshape() != kTfLiteOk)
@@ -167,6 +170,13 @@ bool VerifierModel::register_ops_(tflite::MicroMutableOpResolver<17> &op_resolve
   if (op_resolver.AddPack() != kTfLiteOk)
     return false;
   if (op_resolver.AddSplitV() != kTfLiteOk)
+    return false;
+  // The wakegen-native (contract v2 era) verifier export emits the
+  // [B,T,40] -> [B,T,1,40] step as a literal EXPAND_DIMS with a SHAPE
+  // helper, where the old SavedModel path folded it into a static RESHAPE
+  if (op_resolver.AddExpandDims() != kTfLiteOk)
+    return false;
+  if (op_resolver.AddShape() != kTfLiteOk)
     return false;
 
   return true;

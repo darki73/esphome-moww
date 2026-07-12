@@ -51,7 +51,12 @@ class VerifierModel {
 
  protected:
   /// @brief Returns true if all TensorFlow operations the non-streaming model needs were registered
-  bool register_ops_(tflite::MicroMutableOpResolver<17> &op_resolver);
+  bool register_ops_(tflite::MicroMutableOpResolver<18> &op_resolver);
+
+  // register_ops_ must run at most ONCE per resolver: re-registering the
+  // same ops fails, so a retried load_model() after any failed attempt
+  // would otherwise poison the resolver permanently
+  bool ops_registered_{false};
 
   const uint8_t *model_start_;
   uint8_t probability_cutoff_;
@@ -64,7 +69,7 @@ class VerifierModel {
   uint8_t *tensor_arena_{nullptr};
   size_t allocated_arena_size_{0};
   std::unique_ptr<tflite::MicroInterpreter> interpreter_;
-  tflite::MicroMutableOpResolver<17> op_resolver_;
+  tflite::MicroMutableOpResolver<18> op_resolver_;
 };
 
 }  // namespace esphome::micro_wake_word
