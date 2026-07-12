@@ -13,6 +13,16 @@ namespace esphome::micro_wake_word {
 
 static const char *const TAG = "micro_wake_word.verifier";
 
+// A MicroInterpreter whose AllocateTensors() FAILED must not be destructed:
+// there is a failure window where the subgraph allocations array exists but
+// node tables are uninitialized, and ~MicroInterpreter -> FreeSubgraphs()
+// then walks garbage pointers (observed LoadProhibited on core 1). The
+// interpreter owns nothing outside our arena, so freeing its heap memory
+// without the destructor is safe and leak-free.
+static void discard_failed_interpreter(std::unique_ptr<tflite::MicroInterpreter> &interpreter) {
+  ::operator delete(static_cast<void *>(interpreter.release()));
+}
+
 bool VerifierModel::load_model() {
   if (this->loaded_) {
     return true;
@@ -44,7 +54,7 @@ bool VerifierModel::load_model() {
 
     auto interpreter = make_unique<tflite::MicroInterpreter>(model, this->op_resolver_, arena, attempt_size);
     if (interpreter->AllocateTensors() != kTfLiteOk) {
-      interpreter.reset();
+      discard_failed_interpreter(interpreter);
       arena_allocator.deallocate(arena, attempt_size);
       continue;
     }

@@ -14,6 +14,16 @@
 
 static const char *const TAG = "micro_wake_word";
 
+// A MicroInterpreter whose AllocateTensors() FAILED must not be destructed:
+// there is a failure window where the subgraph allocations array exists but
+// node tables are uninitialized, and ~MicroInterpreter -> FreeSubgraphs()
+// then walks garbage pointers (observed LoadProhibited on core 1). The
+// interpreter owns nothing outside the arena we free ourselves, so freeing
+// its heap memory without the destructor is safe and leak-free.
+static void discard_failed_interpreter(std::unique_ptr<tflite::MicroInterpreter> &interpreter) {
+  ::operator delete(static_cast<void *>(interpreter.release()));
+}
+
 namespace esphome::micro_wake_word {
 
 void WakeWordModel::log_model_config() {
@@ -82,6 +92,9 @@ bool StreamingModel::load_model_() {
                                               this->tensor_arena_, this->tensor_arena_size_, this->mrv_);
     if (this->interpreter_->AllocateTensors() != kTfLiteOk) {
       ESP_LOGE(TAG, "Failed to allocate tensors for the streaming model");
+      // a failed interpreter must never reach ~MicroInterpreter (see
+      // discard_failed_interpreter) — unload_model() would destruct it
+      discard_failed_interpreter(this->interpreter_);
       return false;
     }
 
@@ -281,7 +294,7 @@ size_t StreamingModel::probe_arena_size_() {
         tflite::GetModel(this->model_start_), this->streaming_op_resolver_, probe_arena, attempt_size, this->mrv_);
 
     if (probe_interpreter->AllocateTensors() != kTfLiteOk) {
-      probe_interpreter.reset();
+      discard_failed_interpreter(probe_interpreter);
       arena_allocator.deallocate(probe_arena, attempt_size);
       this->recreate_resource_variables_();
       continue;
@@ -301,7 +314,11 @@ size_t StreamingModel::probe_arena_size_() {
 
       bool ok = test_interpreter->AllocateTensors() == kTfLiteOk;
 
-      test_interpreter.reset();
+      if (ok) {
+        test_interpreter.reset();
+      } else {
+        discard_failed_interpreter(test_interpreter);
+      }
       this->recreate_resource_variables_();
 
       if (ok) {
