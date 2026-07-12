@@ -66,6 +66,48 @@ firmware, like the wake models themselves. Without the `verifier:` block the
 firmware is behaviorally identical to stock (verified: both variants compile;
 the cascade code is fully `#ifdef`-gated).
 
+### Dropdowns and toggles (interim, via template entities)
+
+Native sub-platform entities are planned for the stage-3 phase. Until then the
+runtime API is fully controllable from template entities, the same pattern the
+stock Voice PE firmware uses for its sensitivity select
+(see `test/moww-test.yaml` for a compile-verified example):
+
+```yaml
+switch:
+  - platform: template
+    name: "On-device verification"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: id(mww).get_verifier_model()->set_enabled(true);
+    turn_off_action:
+      - lambda: id(mww).get_verifier_model()->set_enabled(false);
+
+select:
+  - platform: template
+    name: "Wake sensitivity"
+    optimistic: true
+    initial_option: "Balanced"
+    restore_value: true
+    entity_category: config
+    options: [Relaxed, Balanced, Paranoid]
+    on_value:
+      # Strictness is mostly the verifier's job; stage 1 stays greedy.
+      # Cutoffs are quantized: value = round(probability * 255).
+      lambda: |-
+        if (x == "Relaxed") {
+          id(my_wake_word).set_probability_cutoff(26);                 // stage-1 0.10
+          id(mww).get_verifier_model()->set_probability_cutoff(153);  // stage-2 0.60
+        } else if (x == "Balanced") {
+          id(my_wake_word).set_probability_cutoff(26);
+          id(mww).get_verifier_model()->set_probability_cutoff(178);  // 0.70
+        } else {
+          id(my_wake_word).set_probability_cutoff(43);                 // stage-1 0.17
+          id(mww).get_verifier_model()->set_probability_cutoff(204);  // 0.80
+        }
+```
+
 ### Notes
 
 - Verification runs inline on the inference task (~tens of ms per candidate);

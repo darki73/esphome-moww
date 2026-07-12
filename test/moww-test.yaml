@@ -48,3 +48,40 @@ micro_wake_word:
     - logger.log:
         format: "wake word %s"
         args: ["wake_word.c_str()"]
+
+switch:
+  - platform: template
+    name: "On-device verification"
+    id: verifier_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: id(mww).get_verifier_model()->set_enabled(true);
+    turn_off_action:
+      - lambda: id(mww).get_verifier_model()->set_enabled(false);
+
+select:
+  - platform: template
+    name: "Wake sensitivity"
+    id: wake_sensitivity
+    optimistic: true
+    initial_option: "Balanced"
+    restore_value: true
+    entity_category: config
+    options:
+      - Relaxed
+      - Balanced
+      - Paranoid
+    on_value:
+      # Stage-1 cutoff stays greedy; strictness is mostly the verifier's job
+      lambda: |-
+        if (x == "Relaxed") {
+          id(okay_nabu).set_probability_cutoff(26);                       // stage-1 0.10
+          id(mww).get_verifier_model()->set_probability_cutoff(153);     // stage-2 0.60
+        } else if (x == "Balanced") {
+          id(okay_nabu).set_probability_cutoff(26);                       // stage-1 0.10
+          id(mww).get_verifier_model()->set_probability_cutoff(178);     // stage-2 0.70
+        } else {
+          id(okay_nabu).set_probability_cutoff(43);                       // stage-1 0.17
+          id(mww).get_verifier_model()->set_probability_cutoff(204);     // stage-2 0.80
+        }
