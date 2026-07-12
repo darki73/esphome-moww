@@ -48,7 +48,11 @@ void VoiceAssistant::setup() {
     // explicit std::function type: the subscribe overload set is ambiguous
     // for a bare lambda (StringRef vs const std::string& callbacks)
     std::function<void(const std::string &)> on_state = [this](const std::string &state) {
-      bool available = !state.empty() && state != "unavailable" && state != "unknown" && state != "None";
+      // A wake_word entity's state is the timestamp of its last detection,
+      // so "unknown" is the NORMAL state of a healthy engine that has not
+      // detected anything yet. Only "unavailable" means the engine is gone;
+      // an entity that does not exist never reports at all (stays false).
+      bool available = !state.empty() && state != "unavailable";
       if (available != this->ha_verification_available_) {
         ESP_LOGD(TAG, "HA wake engine '%s' is %s", this->ha_verification_entity_id_.c_str(),
                  available ? "available" : "unavailable");

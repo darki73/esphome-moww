@@ -39,8 +39,8 @@ void VerificationModeSelect::control(const std::string &value) {
   }
   if (mode_uses_ha(index.value()) && !this->ha_available_()) {
     ESP_LOGW(TAG, "Rejecting '%s': Home Assistant wake engine is not available", value.c_str());
-    // Re-publish the current state so the frontend snaps back
-    this->publish_state(this->state);
+    // Re-publish the current option so the frontend snaps back
+    this->publish_state(std::string(this->current_option()));
     return;
   }
   this->apply_(index.value());
