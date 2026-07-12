@@ -3,10 +3,12 @@
 
 #ifdef USE_VOICE_ASSISTANT
 
+#include "esphome/components/api/api_server.h"
 #include "esphome/components/socket/socket.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 
@@ -35,6 +37,29 @@ static const uint32_t AUDIO_CHANNEL_STALL_TIMEOUT_MS = 2000;
 VoiceAssistant::VoiceAssistant() { global_voice_assistant = this; }
 
 void VoiceAssistant::setup() {
+  // Track the Home Assistant wake engine entity (e.g. openWakeWord's
+  // wake_word entity): stage-3 verification only engages while it is alive,
+  // otherwise a pipeline with a wake stage and no engine would eat the
+  // detection instead of verifying it. (The codegen adds
+  // USE_API_HOMEASSISTANT_STATES whenever ha_wake_word_verification is
+  // configured.)
+#ifdef USE_API_HOMEASSISTANT_STATES
+  if (!this->ha_verification_entity_id_.empty()) {
+    // explicit std::function type: the subscribe overload set is ambiguous
+    // for a bare lambda (StringRef vs const std::string& callbacks)
+    std::function<void(const std::string &)> on_state = [this](const std::string &state) {
+      bool available = !state.empty() && state != "unavailable" && state != "unknown" && state != "None";
+      if (available != this->ha_verification_available_) {
+        ESP_LOGD(TAG, "HA wake engine '%s' is %s", this->ha_verification_entity_id_.c_str(),
+                 available ? "available" : "unavailable");
+      }
+      this->ha_verification_available_ = available;
+    };
+    api::global_api_server->subscribe_home_assistant_state(this->ha_verification_entity_id_,
+                                                           optional<std::string>(), std::move(on_state));
+  }
+#endif
+
   this->mic_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
     std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
     if (temp_ring_buffer != nullptr) {
@@ -257,6 +282,40 @@ void VoiceAssistant::stream_api_audio_() {
   }
 }
 
+void VoiceAssistant::send_pre_roll_() {
+#if defined(USE_MICRO_WAKE_WORD) && defined(USE_MICRO_WAKE_WORD_PCM_HISTORY)
+  if (this->micro_wake_word_ == nullptr || this->api_client_ == nullptr) {
+    return;
+  }
+  const size_t max_samples = (16000 * this->pre_roll_duration_ms_) / 1000;
+  RAMAllocator<int16_t> allocator;
+  int16_t *buffer = allocator.allocate(max_samples);
+  if (buffer == nullptr) {
+    ESP_LOGW(TAG, "Could not allocate pre-roll buffer; skipping pre-roll");
+    return;
+  }
+  size_t samples = this->micro_wake_word_->copy_pcm_history(buffer, max_samples);
+
+  // 512 samples = 1024 bytes per message, matching the live stream's scale
+  const size_t chunk_samples = 512;
+  for (size_t offset = 0; offset < samples; offset += chunk_samples) {
+    size_t count = std::min(chunk_samples, samples - offset);
+    api::VoiceAssistantAudio msg;
+    msg.data = reinterpret_cast<uint8_t *>(buffer + offset);
+    msg.data_len = count * sizeof(int16_t);
+    if (this->audio_source2_ != nullptr) {
+      // Both channels must always carry a payload (empty = end-of-stream to
+      // Home Assistant); the history is single-channel, so mirror it
+      msg.data2 = msg.data;
+      msg.data2_len = msg.data_len;
+    }
+    this->api_client_->send_message(msg);
+  }
+  allocator.deallocate(buffer, max_samples);
+  ESP_LOGD(TAG, "Sent %u ms of wake pre-roll", (unsigned) (samples / 16));
+#endif
+}
+
 void VoiceAssistant::handle_channel_stall_(size_t available, size_t available2) {
   // Called when at least one configured channel has no audio exposed. When one channel has data and the
   // other does not, watch how long the empty channel stays starved: Home Assistant has no stream timeout
@@ -332,8 +391,20 @@ void VoiceAssistant::loop() {
     }
     case State::START_PIPELINE: {
       ESP_LOGD(TAG, "Requesting start");
+      // Stage-3: a wake-word-triggered start (wake_word_ set by the
+      // micro_wake_word detection) re-runs Home Assistant's wake stage over
+      // the pre-roll for verification — but only while the HA wake engine
+      // entity is alive; without an engine the wake stage would never
+      // resolve and the detection would be lost.
+      bool ha_verify =
+          this->ha_verification_enabled_ && !this->continue_conversation_ && !this->wake_word_.empty();
+      if (ha_verify && !this->ha_verification_available_) {
+        ESP_LOGW(TAG, "HA wake verification enabled but engine '%s' unavailable; passing through",
+                 this->ha_verification_entity_id_.c_str());
+        ha_verify = false;
+      }
       uint32_t flags = 0;
-      if (!this->continue_conversation_ && this->use_wake_word_)
+      if (!this->continue_conversation_ && (this->use_wake_word_ || ha_verify))
         flags |= api::enums::VOICE_ASSISTANT_REQUEST_USE_WAKE_WORD;
       if (this->silence_detection_)
         flags |= api::enums::VOICE_ASSISTANT_REQUEST_USE_VAD;
@@ -363,6 +434,7 @@ void VoiceAssistant::loop() {
         this->set_state_(State::IDLE, State::IDLE);
         break;
       }
+      this->pre_roll_pending_ = ha_verify;
       this->set_state_(State::STARTING_PIPELINE);
       this->set_timeout("reset-conversation_id", this->conversation_timeout_,
                         [this]() { this->reset_conversation_id(); });
@@ -374,6 +446,10 @@ void VoiceAssistant::loop() {
     case State::STREAMING_MICROPHONE: {
       // pre_shift is ignored by RingBufferAudioSource (no intermediate transfer buffer to compact).
       if (this->audio_mode_ == AUDIO_MODE_API) {
+        if (this->pre_roll_pending_) {
+          this->pre_roll_pending_ = false;
+          this->send_pre_roll_();
+        }
         this->stream_api_audio_();
       } else {
         // UDP (will eventually be deprecated)

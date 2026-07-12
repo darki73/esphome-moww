@@ -126,6 +126,20 @@ class VoiceAssistant : public Component {
 #ifdef USE_MICRO_WAKE_WORD
   void set_micro_wake_word(micro_wake_word::MicroWakeWord *mww) { this->micro_wake_word_ = mww; }
 #endif
+
+  // Stage-3 pipeline-native verification: on a wake-word-triggered start,
+  // request Home Assistant's wake stage (openWakeWord or any wake_word
+  // engine) and prepend micro_wake_word's PCM history so that stage hears
+  // the utterance itself. See the moww README for the cascade design.
+  void set_ha_verification_entity_id(const std::string &entity_id) {
+    this->ha_verification_entity_id_ = entity_id;
+  }
+  void set_pre_roll_duration(uint32_t duration_ms) { this->pre_roll_duration_ms_ = duration_ms; }
+  void set_ha_wake_word_verification(bool enabled) { this->ha_verification_enabled_ = enabled; }
+  bool get_ha_wake_word_verification() const { return this->ha_verification_enabled_; }
+  /// True when the configured Home Assistant wake engine entity is alive.
+  bool ha_verification_available() const { return this->ha_verification_available_; }
+
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) {
     this->speaker_ = speaker;
@@ -333,6 +347,17 @@ class VoiceAssistant : public Component {
   uint8_t auto_gain_;
   float volume_multiplier_;
   uint32_t conversation_timeout_;
+
+  // Stage-3 pipeline-native verification state
+  std::string ha_verification_entity_id_{};
+  bool ha_verification_enabled_{false};
+  bool ha_verification_available_{false};
+  uint32_t pre_roll_duration_ms_{2000};
+  bool pre_roll_pending_{false};
+
+  /// Sends micro_wake_word's PCM history ahead of the live microphone
+  /// stream so Home Assistant's wake stage hears the wake word itself.
+  void send_pre_roll_();
 
   bool continuous_{false};
   bool silence_detection_;

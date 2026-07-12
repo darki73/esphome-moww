@@ -12,6 +12,12 @@ psram:
 
 logger:
 
+wifi:
+  ssid: compile-test
+  password: compile-test
+
+api:
+
 external_components:
   - source:
       type: local
@@ -49,6 +55,18 @@ micro_wake_word:
         format: "wake word %s"
         args: ["wake_word.c_str()"]
 
+# Stage 3: pipeline-native verification in Home Assistant (openWakeWord).
+# Only engages while the engine entity is alive in HA.
+voice_assistant:
+  id: va
+  microphone:
+    microphone: mic
+    channels: 0
+  micro_wake_word: mww
+  ha_wake_word_verification:
+    engine_entity: wake_word.openwakeword
+    pre_roll: 2s
+
 # Native entity platforms (flash-persisted; replace the old template recipes)
 switch:
   - platform: micro_wake_word
@@ -60,3 +78,7 @@ select:
     type: sensitivity
     name: "Wake sensitivity"
     # presets: omitted -> Relaxed/Balanced/Paranoid fleet defaults
+  - platform: micro_wake_word
+    type: verification
+    name: "Wake verification"
+    voice_assistant_id: va

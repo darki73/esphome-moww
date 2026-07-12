@@ -105,9 +105,41 @@ state survive reboots via ESP preferences.
   inference error never eats a detection.
 - A refuted candidate is logged at debug level:
   `Verifier refuted 'ева': score 0.12, cutoff 0.70, 43 ms`.
-- `pcm_history` keeps the last N seconds of raw audio in PSRAM. It is not yet
-  consumed by anything; it is the pre-roll source for the upcoming
-  pipeline-native Home Assistant verification stage (stage 3).
+- `pcm_history` keeps the last N seconds of raw audio in PSRAM. It is the
+  pre-roll source for stage-3 verification (below).
+
+### Stage 3: verification in Home Assistant (openWakeWord)
+
+openWakeWord never runs on the device — it is far beyond ESP32 budgets. It
+runs in Home Assistant as the assist pipeline's wake engine (Wyoming
+openWakeWord add-on with your custom model, e.g. `eva_oww`). Stage 3 is how
+the device involves it: on a wake-word-triggered pipeline start, the forked
+`voice_assistant` component sets the `USE_WAKE_WORD` pipeline flag and
+prepends `pcm_history` pre-roll to the audio stream, so HA's wake stage
+hears «Ева» itself and verifies it before speech-to-text — same stream, no
+extra round trips, no URLs.
+
+```yaml
+voice_assistant:
+  micro_wake_word: mww          # pre-roll source
+  ha_wake_word_verification:
+    engine_entity: wake_word.openwakeword   # HA wake engine entity
+    pre_roll: 2s
+
+select:
+  - platform: micro_wake_word
+    type: verification          # Off / On-device / Home Assistant / Both
+    name: "Wake verification"
+    voice_assistant_id: va
+```
+
+Availability is honest: the device subscribes to the engine entity's state.
+While it is unavailable (add-on stopped, engine removed), the `Home
+Assistant`/`Both` options are refused at selection time, and a
+wake-word-triggered start falls back to passing through rather than handing
+the detection to a wake stage that would never answer. HA-side requirements:
+the device's assist pipeline must have the openWakeWord engine with your
+wake model selected as its wake word.
 
 ### Model contracts
 

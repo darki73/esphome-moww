@@ -38,6 +38,12 @@ CONF_SILENCE_DETECTION = "silence_detection"
 CONF_USE_WAKE_WORD = "use_wake_word"
 CONF_VAD_THRESHOLD = "vad_threshold"
 
+# Stage-3 pipeline-native verification (moww fork)
+CONF_HA_WAKE_WORD_VERIFICATION = "ha_wake_word_verification"
+CONF_ENGINE_ENTITY = "engine_entity"
+CONF_ENABLED = "enabled"
+CONF_PRE_ROLL = "pre_roll"
+
 CONF_AUTO_GAIN = "auto_gain"
 CONF_NOISE_SUPPRESSION_LEVEL = "noise_suppression_level"
 CONF_VOLUME_MULTIPLIER = "volume_multiplier"
@@ -113,6 +119,17 @@ CONFIG_SCHEMA = cv.All(
             cv.Exclusive(CONF_SPEAKER, "output"): cv.use_id(speaker.Speaker),
             cv.Optional(CONF_USE_WAKE_WORD, default=False): cv.boolean,
             cv.Optional(CONF_MICRO_WAKE_WORD): cv.use_id(micro_wake_word.MicroWakeWord),
+            cv.Optional(CONF_HA_WAKE_WORD_VERIFICATION): cv.Schema(
+                {
+                    # The HA wake engine's entity (openWakeWord's wake_word
+                    # entity). Verification only engages while it is alive.
+                    cv.Required(CONF_ENGINE_ENTITY): cv.entity_id,
+                    cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+                    cv.Optional(
+                        CONF_PRE_ROLL, default="2s"
+                    ): cv.positive_time_period_milliseconds,
+                }
+            ),
             cv.Optional(CONF_VAD_THRESHOLD): cv.invalid(
                 "VAD threshold is no longer supported, as it requires the deprecated esp_adf external component. Use an i2s_audio microphone/speaker instead. Additionally, you may need to configure the audio_adc and audio_dac components depending on your hardware."
             ),
@@ -214,6 +231,15 @@ async def to_code(config):
     if CONF_MICRO_WAKE_WORD in config:
         mww = await cg.get_variable(config[CONF_MICRO_WAKE_WORD])
         cg.add(var.set_micro_wake_word(mww))
+
+    if CONF_HA_WAKE_WORD_VERIFICATION in config:
+        verification = config[CONF_HA_WAKE_WORD_VERIFICATION]
+        cg.add(var.set_ha_verification_entity_id(verification[CONF_ENGINE_ENTITY]))
+        cg.add(var.set_ha_wake_word_verification(verification[CONF_ENABLED]))
+        cg.add(var.set_pre_roll_duration(verification[CONF_PRE_ROLL]))
+        # the engine-availability subscription needs the API server's
+        # Home Assistant state support compiled in
+        cg.add_define("USE_API_HOMEASSISTANT_STATES")
 
     if CONF_MEDIA_PLAYER in config:
         mp = await cg.get_variable(config[CONF_MEDIA_PLAYER])
