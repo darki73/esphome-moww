@@ -10,6 +10,9 @@
 #include <tensorflow/lite/micro/micro_interpreter.h>
 #include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
 
+#include <utility>
+#include <vector>
+
 namespace esphome::micro_wake_word {
 
 static const uint8_t MIN_SLICES_BEFORE_DETECTION = 100;

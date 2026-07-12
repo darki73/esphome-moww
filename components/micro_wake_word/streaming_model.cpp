@@ -5,6 +5,13 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+
 static const char *const TAG = "micro_wake_word";
 
 namespace esphome::micro_wake_word {
@@ -132,37 +139,94 @@ void StreamingModel::recreate_resource_variables_() {
 }
 
 bool StreamingModel::setup_v2_tensors_() {
-  size_t input_count = this->interpreter_->inputs_size();
-  size_t output_count = this->interpreter_->outputs_size();
-  if (output_count != input_count) {
-    ESP_LOGE(TAG, "v2 model: %zu inputs but %zu outputs", input_count, output_count);
+  // The converter scrambles raw subgraph tensor order, so positions must be
+  // resolved through the flatbuffer SignatureDef (name -> tensor index).
+  // Contract: input names are "input_chunk" + "state_NN_*" (lexical order =
+  // construction order); output "output_0" is the probability and
+  // "output_{i+1}" is the next value of the i-th state.
+  const tflite::Model *model = tflite::GetModel(this->model_start_);
+  const auto *signature_defs = model->signature_defs();
+  if (signature_defs == nullptr || signature_defs->size() == 0) {
+    ESP_LOGE(TAG, "v2 model has no signature; cannot map state tensors");
+    return false;
+  }
+  const auto *signature = signature_defs->Get(0);
+  if (signature->subgraph_index() != 0) {
+    ESP_LOGE(TAG, "v2 model signature is not on the primary subgraph");
+    return false;
+  }
+  const auto *subgraph_inputs = model->subgraphs()->Get(0)->inputs();
+  const auto *subgraph_outputs = model->subgraphs()->Get(0)->outputs();
+
+  auto position_of = [](const flatbuffers::Vector<int32_t> *tensors, int32_t tensor_index) -> int {
+    for (flatbuffers::uoffset_t i = 0; i < tensors->size(); i++) {
+      if (tensors->Get(i) == tensor_index)
+        return (int) i;
+    }
+    return -1;
+  };
+
+  this->data_input_index_ = -1;
+  std::vector<std::pair<std::string, int>> state_inputs;
+  for (const auto *entry : *signature->inputs()) {
+    int position = position_of(subgraph_inputs, entry->tensor_index());
+    if (position < 0) {
+      ESP_LOGE(TAG, "v2 signature input '%s' is not a subgraph input", entry->name()->c_str());
+      return false;
+    }
+    std::string name = entry->name()->str();
+    if (name.rfind("state_", 0) == 0) {
+      state_inputs.emplace_back(name, position);
+    } else if (this->data_input_index_ == -1) {
+      this->data_input_index_ = position;
+    } else {
+      ESP_LOGE(TAG, "v2 model has more than one data input");
+      return false;
+    }
+  }
+  if (this->data_input_index_ == -1) {
+    ESP_LOGE(TAG, "v2 model has no data input");
+    return false;
+  }
+  std::sort(state_inputs.begin(), state_inputs.end());
+
+  this->probability_output_index_ = -1;
+  std::vector<int> state_output_positions(state_inputs.size(), -1);
+  for (const auto *entry : *signature->outputs()) {
+    int position = position_of(subgraph_outputs, entry->tensor_index());
+    if (position < 0) {
+      ESP_LOGE(TAG, "v2 signature output '%s' is not a subgraph output", entry->name()->c_str());
+      return false;
+    }
+    const char *name = entry->name()->c_str();
+    const char *underscore = strrchr(name, '_');
+    if (underscore == nullptr) {
+      ESP_LOGE(TAG, "v2 output '%s' is not 'output_N'", name);
+      return false;
+    }
+    int output_number = atoi(underscore + 1);
+    if (output_number == 0) {
+      this->probability_output_index_ = position;
+    } else if ((size_t) (output_number - 1) < state_inputs.size()) {
+      state_output_positions[output_number - 1] = position;
+    } else {
+      ESP_LOGE(TAG, "v2 output '%s' has no matching state input", name);
+      return false;
+    }
+  }
+  if (this->probability_output_index_ == -1) {
+    ESP_LOGE(TAG, "v2 model has no probability output");
     return false;
   }
 
-  // The data input is the only 3-D tensor [1, stride, features]; every
-  // state input is 4-D. Subgraph order pairs state input i with output i+1
-  // (output 0 is the probability) — validated below.
-  this->data_input_index_ = -1;
   this->state_pairs_.clear();
-  int state_output_index = 0;
-  for (size_t i = 0; i < input_count; i++) {
-    TfLiteTensor *input = this->interpreter_->input(i);
-    if (input->dims->size == 3) {
-      if (this->data_input_index_ != -1) {
-        ESP_LOGE(TAG, "v2 model has more than one data input");
-        return false;
-      }
-      this->data_input_index_ = i;
-      continue;
+  for (size_t i = 0; i < state_inputs.size(); i++) {
+    if (state_output_positions[i] < 0) {
+      ESP_LOGE(TAG, "v2 state '%s' has no paired output", state_inputs[i].first.c_str());
+      return false;
     }
-    state_output_index++;
-    this->state_pairs_.emplace_back(i, state_output_index);
+    this->state_pairs_.emplace_back(state_inputs[i].second, state_output_positions[i]);
   }
-  if (this->data_input_index_ == -1) {
-    ESP_LOGE(TAG, "v2 model has no [1, stride, features] data input");
-    return false;
-  }
-  this->probability_output_index_ = 0;
 
   for (auto &pair : this->state_pairs_) {
     TfLiteTensor *state_in = this->interpreter_->input(pair.first);
