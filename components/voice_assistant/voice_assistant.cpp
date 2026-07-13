@@ -422,7 +422,12 @@ void VoiceAssistant::loop() {
       msg.conversation_id = StringRef(this->conversation_id_);
       msg.flags = flags;
       msg.audio_settings = audio_settings;
-      msg.wake_word_phrase = StringRef(this->wake_word_);
+      // With HA verification the wake stage's own detection registers the
+      // wake-up (and provides fleet-wide dedup); sending the phrase too
+      // would register it twice and Home Assistant's duplicate_wake_up
+      // filter would kill the pipeline
+      static const std::string EMPTY_WAKE_WORD_PHRASE;
+      msg.wake_word_phrase = StringRef(ha_verify ? EMPTY_WAKE_WORD_PHRASE : this->wake_word_);
 
       // Reset media player state tracking
 #ifdef USE_MEDIA_PLAYER
