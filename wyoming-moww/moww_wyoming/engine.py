@@ -35,6 +35,12 @@ VERIFY_STRIDE_FRAMES = 5
 # hold the past in the feature history — sweep windows ending before the
 # candidate too.
 VERIFY_BACK_FRAMES = 60
+# Server-only: for the first seconds of a session (the pre-roll, which is
+# where the wake word lives) don't gate on the cold streaming model at all —
+# run the verifier directly on a sliding window. Stage 1 is a compute-saving
+# device for the ESP32; the server can afford the verifier as primary.
+SWEEP_FRAMES = 400  # 4 s
+SWEEP_STRIDE_FRAMES = 15  # every 150 ms
 # Frames to suppress new candidates after a resolved one.
 REFRACTORY_AFTER_DETECT = 100
 REFRACTORY_AFTER_REFUTE = 25
@@ -209,12 +215,17 @@ class StreamDetector:
         self._frames_waited = 0
         self._best_score = 0.0
         self._candidate_probability = 0.0
+        self._frame_count = 0
 
     def process(self, pcm: bytes) -> Detection | None:
         """Feed PCM; returns a Detection when the cascade confirms."""
         self._samples += len(pcm) // 2
         for frame in self._frontend.process(pcm):
             self._history.append(frame)
+            self._frame_count += 1
+            detection = self._sweep_tick_()
+            if detection is not None:
+                return detection
             detection = self._tick_pending_(frame)
             if detection is not None:
                 return detection
@@ -256,6 +267,29 @@ class StreamDetector:
             if detection is not None:
                 return detection
         return None
+
+    def _sweep_tick_(self) -> Detection | None:
+        """Verifier-as-primary over the session's opening seconds."""
+        if (
+            self._model.verifier is None
+            or self._refractory > 0
+            or self._frame_count > SWEEP_FRAMES
+            or self._frame_count % SWEEP_STRIDE_FRAMES != 0
+        ):
+            return None
+        score = self._model.verifier.score(self._window_ending_(0))
+        if score < self._model.verifier_cutoff:
+            return None
+        _LOGGER.debug(
+            "Sweep confirmed '%s': score %.2f at %d ms",
+            self._model.name,
+            score,
+            self._timestamp_ms_(),
+        )
+        self._pending = False
+        self._refractory = REFRACTORY_AFTER_DETECT
+        self._window.clear()
+        return Detection(self._model.name, self._timestamp_ms_(), 0.0, score)
 
     def _backward_sweep_(self) -> Detection | None:
         """A cold-start session fires stage 1 late, after the word is fully

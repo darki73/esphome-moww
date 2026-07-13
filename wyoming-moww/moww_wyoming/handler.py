@@ -20,8 +20,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class MowwEventHandler(AsyncEventHandler):
-    # Cap for save_audio session dumps
-    _SAVE_SECONDS = 12
+    # Cap for save_audio session dumps; HA closes wake sessions after ~6 s,
+    # so the threshold must sit below that or nothing ever flushes
+    _SAVE_SECONDS = 6
 
     def __init__(
         self,
@@ -112,6 +113,7 @@ class MowwEventHandler(AsyncEventHandler):
             return True
 
         if AudioStop.is_type(event.type):
+            self._flush_save_()
             if not self._detected:
                 await self.write_event(NotDetected().event())
             _LOGGER.debug(
@@ -130,7 +132,16 @@ class MowwEventHandler(AsyncEventHandler):
         if self._save_dir is None or self._save_written:
             return
         self._save_buffer.extend(audio)
-        if len(self._save_buffer) < 16000 * 2 * self._SAVE_SECONDS:
+        if len(self._save_buffer) >= 16000 * 2 * self._SAVE_SECONDS:
+            self._flush_save_()
+
+    def _flush_save_(self) -> None:
+        """Write whatever session audio is buffered (also called at stream end)."""
+        if (
+            self._save_dir is None
+            or self._save_written
+            or len(self._save_buffer) < 16000  # not worth keeping under 0.5 s
+        ):
             return
         self._save_written = True
         self._save_dir.mkdir(parents=True, exist_ok=True)
