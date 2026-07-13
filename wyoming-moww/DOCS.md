@@ -11,8 +11,10 @@ for Assist pipelines.
    - `<name>_verifier.tflite` — one-shot verifier (strongly recommended)
    - `<name>.json` — model manifest; its `wake_word` field is shown as the
      phrase in the UI
-2. Start the add-on. The Wyoming integration discovers it automatically
-   (or add it manually: host `localhost`, port `10400`).
+2. Start the add-on. The Wyoming integration discovers it automatically.
+   To add it manually instead: Settings → Devices & services → Add
+   integration → Wyoming Protocol, host `localhost` (or the HA machine's
+   IP), port `10400`.
 3. In your Assist pipeline settings, pick the moww wake word.
 
 ## Options
