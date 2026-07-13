@@ -1,0 +1,31 @@
+name: Wyoming moww
+version: 0.1.0
+slug: wyoming_moww
+description: Multi-stage wake word engine (streaming detector + verifier) for Assist
+url: https://github.com/darki73/esphome-moww
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+discovery:
+  - wyoming
+map:
+  - share:ro
+ports:
+  "10400/tcp": 10400
+ports_description:
+  "10400/tcp": Wyoming protocol
+options:
+  models_dir: /share/moww
+  stage1_cutoff: 0.1
+  verifier_cutoff: 0.15
+  verifier: true
+  debug: false
+schema:
+  models_dir: str
+  stage1_cutoff: float(0,1)
+  verifier_cutoff: float(0,1)
+  verifier: bool
+  debug: bool

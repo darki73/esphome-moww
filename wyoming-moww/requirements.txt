@@ -1,0 +1,4 @@
+wyoming>=1.6,<2
+numpy>=1.26
+ai-edge-litert>=2.1
+pymicro-features>=1.0

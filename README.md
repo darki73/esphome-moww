@@ -8,10 +8,11 @@ Multi-stage wake word verification for ESPHome — a drop-in enhanced fork of th
 - **Stage 2 — on-device one-shot verifier**: a non-streaming variant of the same
   model re-scores the whole utterance window (~50 ms, no network) and kills most
   false candidates locally.
-- **Stage 3 — Home Assistant verification** *(planned)*: the assist pipeline is
-  started at the wake-word stage with buffered pre-roll audio, so a server-side
-  openWakeWord model gets the final say and the same stream continues straight
-  into STT on confirmation.
+- **Stage 3 — Home Assistant verification**: the assist pipeline is started at
+  the wake-word stage with buffered pre-roll audio, so the server-side wake
+  engine gets the final say and the same stream continues straight into STT on
+  confirmation. The engine is this repo's own **Wyoming moww add-on** (below),
+  running the same detector + verifier cascade server-side.
 
 All stages are opt-in: without a `verifier:` block the component compiles and
 behaves identically to stock `micro_wake_word`.
@@ -110,16 +111,24 @@ state survive reboots via ESP preferences.
 - `pcm_history` keeps the last N seconds of raw audio in PSRAM. It is the
   pre-roll source for stage-3 verification (below).
 
-### Stage 3: verification in Home Assistant (openWakeWord)
+### Stage 3: verification in Home Assistant (Wyoming moww add-on)
 
-openWakeWord never runs on the device — it is far beyond ESP32 budgets. It
-runs in Home Assistant as the assist pipeline's wake engine (Wyoming
-openWakeWord add-on with your custom model, e.g. `eva_oww`). Stage 3 is how
-the device involves it: on a wake-word-triggered pipeline start, the forked
-`voice_assistant` component sets the `USE_WAKE_WORD` pipeline flag and
-prepends `pcm_history` pre-roll to the audio stream, so HA's wake stage
-hears «Ева» itself and verifies it before speech-to-text — same stream, no
-extra round trips, no URLs.
+Stage 3 runs in Home Assistant as the assist pipeline's wake engine. This
+repo doubles as a Home Assistant **add-on repository** shipping
+`wyoming-moww`: a Wyoming wake service that runs the same moww model pair
+(streaming contract-v2 detector + one-shot verifier) server-side.
+
+Install: Settings → Add-ons → Add-on Store → ⋮ → Repositories → add this
+repo's GitHub URL → install "Wyoming moww". Copy the model pair to
+`/share/moww/` (`<name>.tflite`, `<name>_verifier.tflite`, `<name>.json`);
+the Wyoming integration discovers the engine and the pipeline can select
+its wake word. See `wyoming-moww/DOCS.md` for options.
+
+Stage 3 is how the device involves it: on a wake-word-triggered pipeline
+start, the forked `voice_assistant` component sets the `USE_WAKE_WORD`
+pipeline flag and prepends `pcm_history` pre-roll to the audio stream, so
+HA's wake stage hears «Ева» itself and verifies it before speech-to-text —
+same stream, no extra round trips, no URLs.
 
 ```yaml
 voice_assistant:
