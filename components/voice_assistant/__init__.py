@@ -33,6 +33,7 @@ CONF_ON_TTS_START = "on_tts_start"
 CONF_ON_TTS_STREAM_START = "on_tts_stream_start"
 CONF_ON_TTS_STREAM_END = "on_tts_stream_end"
 CONF_ON_WAKE_WORD_DETECTED = "on_wake_word_detected"
+CONF_ON_WAKE_WORD_VERIFIED = "on_wake_word_verified"
 
 CONF_SILENCE_DETECTION = "silence_detection"
 CONF_USE_WAKE_WORD = "use_wake_word"
@@ -147,6 +148,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ON_LISTENING): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_START): automation.validate_automation(single=True),
             cv.Optional(CONF_ON_WAKE_WORD_DETECTED): automation.validate_automation(
+                single=True
+            ),
+            cv.Optional(CONF_ON_WAKE_WORD_VERIFIED): automation.validate_automation(
                 single=True
             ),
             cv.Optional(CONF_ON_STT_END): automation.validate_automation(single=True),
@@ -274,6 +278,13 @@ async def to_code(config):
             var.get_wake_word_detected_trigger(),
             [],
             config[CONF_ON_WAKE_WORD_DETECTED],
+        )
+
+    if CONF_ON_WAKE_WORD_VERIFIED in config:
+        await automation.build_automation(
+            var.get_wake_word_verified_trigger(),
+            [],
+            config[CONF_ON_WAKE_WORD_VERIFIED],
         )
 
     if CONF_ON_STT_END in config:

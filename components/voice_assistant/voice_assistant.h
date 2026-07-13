@@ -226,6 +226,7 @@ class VoiceAssistant : public Component {
   Trigger<> *get_tts_stream_end_trigger() { return &this->tts_stream_end_trigger_; }
 #endif
   Trigger<> *get_wake_word_detected_trigger() { return &this->wake_word_detected_trigger_; }
+  Trigger<> *get_wake_word_verified_trigger() { return &this->wake_word_verified_trigger_; }
   Trigger<std::string> *get_stt_end_trigger() { return &this->stt_end_trigger_; }
   Trigger<std::string> *get_tts_end_trigger() { return &this->tts_end_trigger_; }
   Trigger<std::string> *get_tts_start_trigger() { return &this->tts_start_trigger_; }
@@ -280,6 +281,12 @@ class VoiceAssistant : public Component {
 #endif
   Trigger<std::string> intent_progress_trigger_;
   Trigger<> wake_word_detected_trigger_;
+  // Fires when the wake word is FINAL for the current verification mode:
+  // immediately on wake-initiated starts that skip HA verification, at the
+  // wake stage's verdict (WAKE_WORD_END) when the server has the last word.
+  // The single correct hook for chime/LED feedback in every mode.
+  Trigger<> wake_word_verified_trigger_;
+  bool wake_verified_pending_{false};
   Trigger<std::string> stt_end_trigger_;
   Trigger<std::string> tts_end_trigger_;
   Trigger<std::string> tts_start_trigger_;
@@ -358,6 +365,8 @@ class VoiceAssistant : public Component {
   // abort instead of hanging the pipeline (and eating retries as barge-ins)
   bool ha_wake_verdict_pending_{false};
   void clear_ha_wake_watchdog_();
+  /// Fire on_wake_word_verified once per HA-verified run (no-op otherwise).
+  void fire_wake_word_verified_();
 
   /// Pre-roll drain state: micro_wake_word's PCM history is sent ahead of
   /// the live microphone stream so Home Assistant's wake stage hears the

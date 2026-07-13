@@ -487,6 +487,13 @@ void VoiceAssistant::loop() {
         break;
       }
       this->pre_roll_pending_ = ha_verify;
+      // Unified wake-confirmed moment (chime/LED): a wake-initiated start
+      // that skips HA verification is final right here; with ha_verify the
+      // verdict arrives as WAKE_WORD_END (or STT_START) from the server
+      if (!this->continue_conversation_ && !this->wake_word_.empty() && !ha_verify) {
+        this->defer([this]() { this->wake_word_verified_trigger_.trigger(); });
+      }
+      this->wake_verified_pending_ = ha_verify;
       this->set_state_(State::STARTING_PIPELINE);
       this->set_timeout("reset-conversation_id", this->conversation_timeout_,
                         [this]() { this->reset_conversation_id(); });
@@ -876,6 +883,13 @@ void VoiceAssistant::clear_ha_wake_watchdog_() {
   this->cancel_timeout("ha_wake_watchdog");
 }
 
+void VoiceAssistant::fire_wake_word_verified_() {
+  if (!this->wake_verified_pending_)
+    return;
+  this->wake_verified_pending_ = false;
+  this->defer([this]() { this->wake_word_verified_trigger_.trigger(); });
+}
+
 void VoiceAssistant::signal_stop_() {
   memset(&this->dest_addr_, 0, sizeof(this->dest_addr_));
   if (this->api_client_ == nullptr) {
@@ -920,12 +934,16 @@ void VoiceAssistant::on_event(const api::VoiceAssistantEventResponse &msg) {
     case api::enums::VOICE_ASSISTANT_WAKE_WORD_END: {
       ESP_LOGD(TAG, "Wake word detected");
       this->clear_ha_wake_watchdog_();
+      this->fire_wake_word_verified_();
       this->defer([this]() { this->wake_word_detected_trigger_.trigger(); });
       break;
     }
     case api::enums::VOICE_ASSISTANT_STT_START:
       ESP_LOGD(TAG, "STT started");
       this->clear_ha_wake_watchdog_();
+      // belt-and-braces: if HA ever starts STT without an explicit
+      // WAKE_WORD_END, the wake was still verified
+      this->fire_wake_word_verified_();
       this->defer([this]() { this->listening_trigger_.trigger(); });
       break;
     case api::enums::VOICE_ASSISTANT_STT_END: {
@@ -1047,6 +1065,7 @@ void VoiceAssistant::on_event(const api::VoiceAssistantEventResponse &msg) {
     case api::enums::VOICE_ASSISTANT_RUN_END: {
       ESP_LOGD(TAG, "Assist Pipeline ended");
       this->clear_ha_wake_watchdog_();
+      this->wake_verified_pending_ = false;  // refuted/aborted runs never chime
       if ((this->state_ == State::START_PIPELINE) || (this->state_ == State::STARTING_PIPELINE) ||
           (this->state_ == State::STREAMING_MICROPHONE)) {
         // Microphone is running, stop it
@@ -1060,6 +1079,7 @@ void VoiceAssistant::on_event(const api::VoiceAssistantEventResponse &msg) {
     }
     case api::enums::VOICE_ASSISTANT_ERROR: {
       this->clear_ha_wake_watchdog_();
+      this->wake_verified_pending_ = false;
       std::string code;
       std::string message;
       for (const auto &arg : msg.data) {
