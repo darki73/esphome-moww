@@ -354,6 +354,10 @@ class VoiceAssistant : public Component {
   bool ha_verification_available_{false};
   uint32_t pre_roll_duration_ms_{2000};
   bool pre_roll_pending_{false};
+  // Watchdog: a wake-verified start whose wake stage never answers must
+  // abort instead of hanging the pipeline (and eating retries as barge-ins)
+  bool ha_wake_verdict_pending_{false};
+  void clear_ha_wake_watchdog_();
 
   /// Sends micro_wake_word's PCM history ahead of the live microphone
   /// stream so Home Assistant's wake stage hears the wake word itself.
