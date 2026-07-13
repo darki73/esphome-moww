@@ -286,26 +286,40 @@ void VoiceAssistant::stream_api_audio_() {
   }
 }
 
-void VoiceAssistant::send_pre_roll_() {
+void VoiceAssistant::prepare_pre_roll_() {
 #if defined(USE_MICRO_WAKE_WORD) && defined(USE_MICRO_WAKE_WORD_PCM_HISTORY)
+  this->free_pre_roll_();
   if (this->micro_wake_word_ == nullptr || this->api_client_ == nullptr) {
     return;
   }
   const size_t max_samples = (16000 * this->pre_roll_duration_ms_) / 1000;
   RAMAllocator<int16_t> allocator;
-  int16_t *buffer = allocator.allocate(max_samples);
-  if (buffer == nullptr) {
+  this->pre_roll_buffer_ = allocator.allocate(max_samples);
+  if (this->pre_roll_buffer_ == nullptr) {
     ESP_LOGW(TAG, "Could not allocate pre-roll buffer; skipping pre-roll");
     return;
   }
-  size_t samples = this->micro_wake_word_->copy_pcm_history(buffer, max_samples);
+  this->pre_roll_samples_ = this->micro_wake_word_->copy_pcm_history(this->pre_roll_buffer_, max_samples);
+  this->pre_roll_sent_ = 0;
+  if (this->pre_roll_samples_ == 0) {
+    this->free_pre_roll_();
+  }
+#endif
+}
 
-  // 512 samples = 1024 bytes per message, matching the live stream's scale
+bool VoiceAssistant::pump_pre_roll_() {
+  if (this->pre_roll_buffer_ == nullptr) {
+    return true;
+  }
+  // 512 samples = 1024 bytes per message, matching the live stream's scale.
+  // Stop at the first message the API TX buffer refuses — the remainder
+  // goes out on subsequent loop passes. A single unpaced burst overflows
+  // the buffer and silently drops the newest samples: the wake word itself.
   const size_t chunk_samples = 512;
-  for (size_t offset = 0; offset < samples; offset += chunk_samples) {
-    size_t count = std::min(chunk_samples, samples - offset);
+  while (this->pre_roll_sent_ < this->pre_roll_samples_) {
+    size_t count = std::min(chunk_samples, this->pre_roll_samples_ - this->pre_roll_sent_);
     api::VoiceAssistantAudio msg;
-    msg.data = reinterpret_cast<uint8_t *>(buffer + offset);
+    msg.data = reinterpret_cast<uint8_t *>(this->pre_roll_buffer_ + this->pre_roll_sent_);
     msg.data_len = count * sizeof(int16_t);
     if (this->audio_source2_ != nullptr) {
       // Both channels must always carry a payload (empty = end-of-stream to
@@ -313,11 +327,40 @@ void VoiceAssistant::send_pre_roll_() {
       msg.data2 = msg.data;
       msg.data2_len = msg.data_len;
     }
-    this->api_client_->send_message(msg);
+    if (!this->api_client_->send_message(msg)) {
+      return false;
+    }
+    this->pre_roll_sent_ += count;
   }
-  allocator.deallocate(buffer, max_samples);
-  ESP_LOGD(TAG, "Sent %u ms of wake pre-roll", (unsigned) (samples / 16));
-#endif
+  ESP_LOGD(TAG, "Sent %u ms of wake pre-roll", (unsigned) (this->pre_roll_samples_ / 16));
+  this->free_pre_roll_();
+  // Only now is the wake stage guaranteed to have the wake word; arm the
+  // no-verdict watchdog from here
+  this->ha_wake_verdict_pending_ = true;
+  this->set_timeout("ha_wake_watchdog", 5000, [this]() {
+    if (!this->ha_wake_verdict_pending_)
+      return;
+    ESP_LOGW(TAG, "HA wake verification: no verdict within 5 s; stopping pipeline");
+    this->ha_wake_verdict_pending_ = false;
+    this->signal_stop_();
+    this->set_state_(State::STOP_MICROPHONE, State::IDLE);
+    this->defer([this]() {
+      this->error_trigger_.trigger("ha-wake-timeout", "Wake verification timed out");
+    });
+  });
+  return true;
+}
+
+void VoiceAssistant::free_pre_roll_() {
+  if (this->pre_roll_buffer_ == nullptr) {
+    return;
+  }
+  RAMAllocator<int16_t> allocator;
+  const size_t max_samples = (16000 * this->pre_roll_duration_ms_) / 1000;
+  allocator.deallocate(this->pre_roll_buffer_, max_samples);
+  this->pre_roll_buffer_ = nullptr;
+  this->pre_roll_samples_ = 0;
+  this->pre_roll_sent_ = 0;
 }
 
 void VoiceAssistant::handle_channel_stall_(size_t available, size_t available2) {
@@ -457,22 +500,12 @@ void VoiceAssistant::loop() {
       if (this->audio_mode_ == AUDIO_MODE_API) {
         if (this->pre_roll_pending_) {
           this->pre_roll_pending_ = false;
-          this->send_pre_roll_();
-          // Arm the wake-stage watchdog: if the HA wake engine never
-          // answers (engine miss, add-on restart, network), abort instead
-          // of hanging the pipeline until a barge-in
-          this->ha_wake_verdict_pending_ = true;
-          this->set_timeout("ha_wake_watchdog", 5000, [this]() {
-            if (!this->ha_wake_verdict_pending_)
-              return;
-            ESP_LOGW(TAG, "HA wake verification: no verdict within 5 s; stopping pipeline");
-            this->ha_wake_verdict_pending_ = false;
-            this->signal_stop_();
-            this->set_state_(State::STOP_MICROPHONE, State::IDLE);
-            this->defer([this]() {
-              this->error_trigger_.trigger("ha-wake-timeout", "Wake verification timed out");
-            });
-          });
+          this->prepare_pre_roll_();
+        }
+        // The pre-roll must fully drain (paced by API TX backpressure)
+        // before any live audio, or Home Assistant hears them out of order
+        if (!this->pump_pre_roll_()) {
+          break;
         }
         this->stream_api_audio_();
       } else {
@@ -834,6 +867,9 @@ void VoiceAssistant::request_stop() {
 }
 
 void VoiceAssistant::clear_ha_wake_watchdog_() {
+  // Also drop any pre-roll still draining: the pipeline this belonged to is
+  // resolving or gone
+  this->free_pre_roll_();
   if (!this->ha_wake_verdict_pending_)
     return;
   this->ha_wake_verdict_pending_ = false;

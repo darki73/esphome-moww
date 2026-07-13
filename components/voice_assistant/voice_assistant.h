@@ -359,9 +359,17 @@ class VoiceAssistant : public Component {
   bool ha_wake_verdict_pending_{false};
   void clear_ha_wake_watchdog_();
 
-  /// Sends micro_wake_word's PCM history ahead of the live microphone
-  /// stream so Home Assistant's wake stage hears the wake word itself.
-  void send_pre_roll_();
+  /// Pre-roll drain state: micro_wake_word's PCM history is sent ahead of
+  /// the live microphone stream so Home Assistant's wake stage hears the
+  /// wake word itself. It must be paced by the API TX buffer — a single
+  /// burst overflows it and the overflow (the newest samples, i.e. the wake
+  /// word) is silently dropped.
+  int16_t *pre_roll_buffer_{nullptr};
+  size_t pre_roll_samples_{0};
+  size_t pre_roll_sent_{0};
+  void prepare_pre_roll_();
+  bool pump_pre_roll_();
+  void free_pre_roll_();
 
   bool continuous_{false};
   bool silence_detection_;
