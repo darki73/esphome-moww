@@ -303,6 +303,37 @@ void VoiceAssistant::prepare_pre_roll_() {
   this->pre_roll_sent_ = 0;
   if (this->pre_roll_samples_ == 0) {
     this->free_pre_roll_();
+    return;
+  }
+  // The wake history taps the microphone pipeline before the gain the live
+  // stream gets, so the raw pre-roll can be ~40 dB quieter than the live
+  // audio that follows it on the same API channel. Peak-normalize in place
+  // so Home Assistant's wake stage, its STT VAD and saved session audio all
+  // hear one consistent level. Self-adapting: never attenuates, and the cap
+  // keeps a wordless buffer from being boosted into pure hiss. Only this
+  // outgoing copy is touched — on-device detection reads pcm_history raw.
+  int32_t peak = 1;
+  for (size_t i = 0; i < this->pre_roll_samples_; i++) {
+    int32_t magnitude = this->pre_roll_buffer_[i];
+    if (magnitude < 0) {
+      magnitude = -magnitude;
+    }
+    peak = std::max(peak, magnitude);
+  }
+  constexpr int32_t TARGET_PEAK = 11585;       // ~ -9 dBFS
+  constexpr int32_t MAX_GAIN_Q8 = 128 << 8;    // 128x ceiling
+  const int32_t gain_q8 = std::min((TARGET_PEAK << 8) / peak, MAX_GAIN_Q8);
+  if (gain_q8 > (1 << 8)) {
+    for (size_t i = 0; i < this->pre_roll_samples_; i++) {
+      int32_t scaled = (static_cast<int32_t>(this->pre_roll_buffer_[i]) * gain_q8) >> 8;
+      if (scaled > INT16_MAX) {
+        scaled = INT16_MAX;
+      } else if (scaled < INT16_MIN) {
+        scaled = INT16_MIN;
+      }
+      this->pre_roll_buffer_[i] = static_cast<int16_t>(scaled);
+    }
+    ESP_LOGD(TAG, "Pre-roll normalized: peak %d, gain %.1fx", peak, gain_q8 / 256.0f);
   }
 #endif
 }
