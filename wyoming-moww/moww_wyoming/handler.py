@@ -47,6 +47,7 @@ class MowwEventHandler(AsyncEventHandler):
         self._detected = False
         self._chunks = 0
         self._audio_bytes = 0
+        self._stream_started = time.monotonic()
         _LOGGER.debug("Client connected")
 
     async def handle_event(self, event: Event) -> bool:
@@ -73,6 +74,7 @@ class MowwEventHandler(AsyncEventHandler):
             self._detected = False
             self._chunks = 0
             self._audio_bytes = 0
+            self._stream_started = time.monotonic()
             self._save_buffer.clear()
             self._save_written = False
             self._detection_label_ = "nodetect"
@@ -110,10 +112,17 @@ class MowwEventHandler(AsyncEventHandler):
                         else ""
                     )
                 )
+                # wall vs stream position exposes the transport: a healthy
+                # link delivers the buffered pre-roll faster than real time
+                # (wall << stream); wall >> stream means the device->HA leg
+                # is trickling
+                wall_ms = (time.monotonic() - self._stream_started) * 1000
                 _LOGGER.info(
-                    "Detected '%s' at %d ms (stage1 %.2f, verifier %s) in %.0f ms",
+                    "Detected '%s' at %d ms stream / %.0f ms wall "
+                    "(stage1 %.2f, verifier %s) in %.0f ms",
                     name,
                     detection.timestamp_ms,
+                    wall_ms,
                     detection.stage1_probability,
                     f"{detection.verifier_score:.2f}"
                     if detection.verifier_score is not None
