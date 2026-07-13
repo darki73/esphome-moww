@@ -38,6 +38,9 @@ class MowwEventHandler(AsyncEventHandler):
         self._save_dir = save_dir
         self._save_buffer = bytearray()
         self._save_written = False
+        # Baked into the saved WAV's filename so detections and non-detections
+        # sort apart without a labeling pipeline: harvest triage is just `ls`
+        self._detection_label_ = "nodetect"
         self._converter = AudioChunkConverter(rate=16000, width=2, channels=1)
         self._detectors: dict[str, StreamDetector] = {}
         self._requested: list[str] | None = None
@@ -72,6 +75,7 @@ class MowwEventHandler(AsyncEventHandler):
             self._audio_bytes = 0
             self._save_buffer.clear()
             self._save_written = False
+            self._detection_label_ = "nodetect"
             _LOGGER.debug("Audio stream started (models: %s)", ", ".join(names))
             return True
 
@@ -98,6 +102,14 @@ class MowwEventHandler(AsyncEventHandler):
                 if detection is None:
                     continue
                 self._detected = True
+                self._detection_label_ = (
+                    f"eva_at{detection.timestamp_ms}ms"
+                    + (
+                        f"_v{round(detection.verifier_score * 100):02d}"
+                        if detection.verifier_score is not None
+                        else ""
+                    )
+                )
                 _LOGGER.info(
                     "Detected '%s' at %d ms (stage1 %.2f, verifier %s) in %.0f ms",
                     name,
@@ -155,7 +167,9 @@ class MowwEventHandler(AsyncEventHandler):
         self._save_written = True
         self._save_dir.mkdir(parents=True, exist_ok=True)
         path = self._save_dir / (
-            datetime.now().strftime("session_%Y%m%d_%H%M%S.wav")
+            datetime.now().strftime("session_%Y%m%d_%H%M%S_")
+            + self._detection_label_
+            + ".wav"
         )
         with wave.open(str(path), "wb") as out:
             out.setnchannels(1)
