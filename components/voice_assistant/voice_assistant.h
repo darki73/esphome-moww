@@ -22,10 +22,6 @@
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
 #endif
-#ifdef USE_VOICE_ASSISTANT_VERIFIED_WAKE_SOUND
-#include "esphome/components/audio/audio.h"
-#include "esphome/components/speaker/media_player/speaker_media_player.h"
-#endif
 #include "esphome/components/socket/socket.h"
 
 #include <span>
@@ -231,11 +227,8 @@ class VoiceAssistant : public Component {
 #endif
   Trigger<> *get_wake_word_detected_trigger() { return &this->wake_word_detected_trigger_; }
   Trigger<> *get_wake_word_verified_trigger() { return &this->wake_word_verified_trigger_; }
-#ifdef USE_VOICE_ASSISTANT_VERIFIED_WAKE_SOUND
-  void set_verified_wake_sound(audio::AudioFile *file, speaker::SpeakerMediaPlayer *player) {
-    this->verified_wake_sound_file_ = file;
-    this->verified_wake_sound_player_ = player;
-  }
+#ifdef USE_MEDIA_PLAYER
+  void set_verified_wake_sound(const std::string &file_id) { this->verified_wake_sound_ = file_id; }
 #endif
   Trigger<std::string> *get_stt_end_trigger() { return &this->stt_end_trigger_; }
   Trigger<std::string> *get_tts_end_trigger() { return &this->tts_end_trigger_; }
@@ -379,9 +372,10 @@ class VoiceAssistant : public Component {
   void fire_wake_word_verified_();
   /// Trigger + component-played chime: the single wake-confirmed moment.
   void emit_wake_word_verified_();
-#ifdef USE_VOICE_ASSISTANT_VERIFIED_WAKE_SOUND
-  audio::AudioFile *verified_wake_sound_file_{nullptr};
-  speaker::SpeakerMediaPlayer *verified_wake_sound_player_{nullptr};
+#ifdef USE_MEDIA_PLAYER
+  /// Embedded audio-file id played on the media player at the verified
+  /// moment (stock play_sound mechanism); empty = no component chime.
+  std::string verified_wake_sound_;
 #endif
 
   /// Pre-roll drain state: micro_wake_word's PCM history is sent ahead of

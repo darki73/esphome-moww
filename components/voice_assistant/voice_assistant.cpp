@@ -923,13 +923,24 @@ void VoiceAssistant::fire_wake_word_verified_() {
 
 void VoiceAssistant::emit_wake_word_verified_() {
   this->defer([this]() { this->wake_word_verified_trigger_.trigger(); });
-#ifdef USE_VOICE_ASSISTANT_VERIFIED_WAKE_SOUND
+#ifdef USE_MEDIA_PLAYER
   // The chime lives in the component, not in yaml: it plays when the wake is
   // FINAL for the active verification mode, so its timing follows the HA UI
-  // selects with no per-mode yaml wiring. The stock package's "Wake sound"
-  // switch should stay OFF or the local-detect chime will double up.
-  if (this->verified_wake_sound_file_ != nullptr && this->verified_wake_sound_player_ != nullptr) {
-    this->verified_wake_sound_player_->play_file(this->verified_wake_sound_file_, true, false);
+  // selects with no per-mode yaml wiring. Same mechanism as the stock
+  // play_sound script (priority: true) — stop any current announcement,
+  // play the embedded file via the audio-file:// scheme. The stock package's
+  // "Wake sound" switch should stay OFF or the local-detect chime doubles up.
+  if (this->media_player_ != nullptr && !this->verified_wake_sound_.empty()) {
+    if (this->media_player_->state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING) {
+      this->media_player_->make_call()
+          .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
+          .set_announcement(true)
+          .perform();
+    }
+    this->media_player_->make_call()
+        .set_media_url("audio-file://" + this->verified_wake_sound_)
+        .set_announcement(true)
+        .perform();
   }
 #endif
 }
