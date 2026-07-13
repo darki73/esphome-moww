@@ -1,9 +1,11 @@
 from esphome import automation
 from esphome.automation import register_action, register_condition
 import esphome.codegen as cg
-from esphome.components import media_player, micro_wake_word, microphone, speaker
+from esphome.components import audio, media_player, micro_wake_word, microphone, speaker
+from esphome.components.speaker.media_player import SpeakerMediaPlayer
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_FILE,
     CONF_ID,
     CONF_MEDIA_PLAYER,
     CONF_MICROPHONE,
@@ -44,6 +46,9 @@ CONF_HA_WAKE_WORD_VERIFICATION = "ha_wake_word_verification"
 CONF_ENGINE_ENTITY = "engine_entity"
 CONF_ENABLED = "enabled"
 CONF_PRE_ROLL = "pre_roll"
+# Component-played chime at the wake-verified moment: timing follows the
+# verification-mode select automatically, no per-mode yaml conditions
+CONF_VERIFIED_WAKE_SOUND = "verified_wake_sound"
 
 CONF_AUTO_GAIN = "auto_gain"
 CONF_NOISE_SUPPRESSION_LEVEL = "noise_suppression_level"
@@ -120,6 +125,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Exclusive(CONF_SPEAKER, "output"): cv.use_id(speaker.Speaker),
             cv.Optional(CONF_USE_WAKE_WORD, default=False): cv.boolean,
             cv.Optional(CONF_MICRO_WAKE_WORD): cv.use_id(micro_wake_word.MicroWakeWord),
+            cv.Optional(CONF_VERIFIED_WAKE_SOUND): cv.Schema(
+                {
+                    cv.Required(CONF_FILE): cv.use_id(audio.AudioFile),
+                    cv.Required(CONF_MEDIA_PLAYER): cv.use_id(SpeakerMediaPlayer),
+                }
+            ),
             cv.Optional(CONF_HA_WAKE_WORD_VERIFICATION): cv.Schema(
                 {
                     # The HA wake engine's entity (openWakeWord's wake_word
@@ -244,6 +255,12 @@ async def to_code(config):
         # the engine-availability subscription needs the API server's
         # Home Assistant state support compiled in
         cg.add_define("USE_API_HOMEASSISTANT_STATES")
+
+    if verified_sound := config.get(CONF_VERIFIED_WAKE_SOUND):
+        sound_file = await cg.get_variable(verified_sound[CONF_FILE])
+        sound_player = await cg.get_variable(verified_sound[CONF_MEDIA_PLAYER])
+        cg.add(var.set_verified_wake_sound(sound_file, sound_player))
+        cg.add_define("USE_VOICE_ASSISTANT_VERIFIED_WAKE_SOUND")
 
     if CONF_MEDIA_PLAYER in config:
         mp = await cg.get_variable(config[CONF_MEDIA_PLAYER])

@@ -522,7 +522,7 @@ void VoiceAssistant::loop() {
       // that skips HA verification is final right here; with ha_verify the
       // verdict arrives as WAKE_WORD_END (or STT_START) from the server
       if (!this->continue_conversation_ && !this->wake_word_.empty() && !ha_verify) {
-        this->defer([this]() { this->wake_word_verified_trigger_.trigger(); });
+        this->emit_wake_word_verified_();
       }
       this->wake_verified_pending_ = ha_verify;
       this->set_state_(State::STARTING_PIPELINE);
@@ -918,7 +918,20 @@ void VoiceAssistant::fire_wake_word_verified_() {
   if (!this->wake_verified_pending_)
     return;
   this->wake_verified_pending_ = false;
+  this->emit_wake_word_verified_();
+}
+
+void VoiceAssistant::emit_wake_word_verified_() {
   this->defer([this]() { this->wake_word_verified_trigger_.trigger(); });
+#ifdef USE_VOICE_ASSISTANT_VERIFIED_WAKE_SOUND
+  // The chime lives in the component, not in yaml: it plays when the wake is
+  // FINAL for the active verification mode, so its timing follows the HA UI
+  // selects with no per-mode yaml wiring. The stock package's "Wake sound"
+  // switch should stay OFF or the local-detect chime will double up.
+  if (this->verified_wake_sound_file_ != nullptr && this->verified_wake_sound_player_ != nullptr) {
+    this->verified_wake_sound_player_->play_file(this->verified_wake_sound_file_, true, false);
+  }
+#endif
 }
 
 void VoiceAssistant::signal_stop_() {
