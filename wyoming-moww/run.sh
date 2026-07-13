@@ -9,6 +9,9 @@ fi
 if ! bashio::config.true 'verifier'; then
     flags+=('--no-verifier')
 fi
+if bashio::config.true 'save_audio'; then
+    flags+=('--save-audio')
+fi
 
 # Announce the service so the Wyoming integration auto-discovers it
 bashio::discovery "wyoming" "$(bashio::var.json uri "tcp://${HOSTNAME}:10400")" > /dev/null || \

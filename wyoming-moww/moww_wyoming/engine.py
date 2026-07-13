@@ -30,6 +30,11 @@ SLIDING_WINDOW = 5
 VERIFY_FIRST_FRAMES = 10
 VERIFY_LAST_FRAMES = 50
 VERIFY_STRIDE_FRAMES = 5
+# Server-only: the streaming model starts cold on a fresh session, so its
+# candidate can fire well AFTER the word ends. Unlike the device we already
+# hold the past in the feature history — sweep windows ending before the
+# candidate too.
+VERIFY_BACK_FRAMES = 60
 # Frames to suppress new candidates after a resolved one.
 REFRACTORY_AFTER_DETECT = 100
 REFRACTORY_AFTER_REFUTE = 25
@@ -192,7 +197,7 @@ class StreamDetector:
         self._model = model
         self._frontend = StreamingFrontend()
         history = (model.verifier.window_frames if model.verifier else 0) + (
-            VERIFY_LAST_FRAMES + SLIDING_WINDOW
+            VERIFY_BACK_FRAMES + VERIFY_LAST_FRAMES + SLIDING_WINDOW
         )
         self._history: deque[np.ndarray] = deque(maxlen=max(history, 8))
         self._chunk: list[np.ndarray] = []
@@ -247,6 +252,35 @@ class StreamDetector:
             self._frames_waited = 0
             self._best_score = 0.0
             self._window.clear()
+            detection = self._backward_sweep_()
+            if detection is not None:
+                return detection
+        return None
+
+    def _backward_sweep_(self) -> Detection | None:
+        """A cold-start session fires stage 1 late, after the word is fully
+        in history — sweep windows ending before the candidate immediately."""
+        for ago in range(0, VERIFY_BACK_FRAMES + 1, VERIFY_STRIDE_FRAMES):
+            window = self._window_ending_(ago)
+            if window is None:
+                break
+            score = self._model.verifier.score(window)
+            self._best_score = max(self._best_score, score)
+            if score >= self._model.verifier_cutoff:
+                _LOGGER.debug(
+                    "Verifier confirmed '%s': score %.2f, -%d ms before candidate",
+                    self._model.name,
+                    score,
+                    ago * STEP_MS,
+                )
+                self._pending = False
+                self._refractory = REFRACTORY_AFTER_DETECT
+                return Detection(
+                    self._model.name,
+                    self._timestamp_ms_(),
+                    self._candidate_probability,
+                    score,
+                )
         return None
 
     def _tick_pending_(self, _frame: np.ndarray) -> Detection | None:
@@ -258,7 +292,7 @@ class StreamDetector:
             or self._frames_waited % VERIFY_STRIDE_FRAMES != 0
         ):
             return None
-        score = self._model.verifier.score(self._verifier_window_())
+        score = self._model.verifier.score(self._window_ending_(0))
         self._best_score = max(self._best_score, score)
         if score >= self._model.verifier_cutoff:
             _LOGGER.debug(
@@ -285,9 +319,14 @@ class StreamDetector:
             self._refractory = REFRACTORY_AFTER_REFUTE
         return None
 
-    def _verifier_window_(self) -> np.ndarray:
+    def _window_ending_(self, frames_ago: int) -> np.ndarray | None:
         window_frames = self._model.verifier.window_frames
-        frames = list(self._history)[-window_frames:]
+        frames = list(self._history)
+        if frames_ago:
+            if frames_ago >= len(frames):
+                return None
+            frames = frames[:-frames_ago]
+        frames = frames[-window_frames:]
         window = np.zeros((window_frames, FEATURE_SIZE), dtype=np.float32)
         if frames:
             window[-len(frames) :] = np.stack(frames)

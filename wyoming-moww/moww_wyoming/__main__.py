@@ -60,6 +60,11 @@ async def main() -> None:
     parser.add_argument(
         "--no-verifier", action="store_true", help="Stage 1 only (not recommended)"
     )
+    parser.add_argument(
+        "--save-audio",
+        action="store_true",
+        help="Dump each session's first seconds to <models-dir>/debug/ (diagnostics)",
+    )
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -95,11 +100,12 @@ async def main() -> None:
         ]
     )
 
+    save_dir = (args.models_dir / "debug") if args.save_audio else None
     server = AsyncServer.from_uri(args.uri)
     _LOGGER.info(
         "wyoming-moww %s: %d model(s) at %s", __version__, len(models), args.uri
     )
-    await server.run(partial(MowwEventHandler, wyoming_info, models))
+    await server.run(partial(MowwEventHandler, wyoming_info, models, save_dir))
 
 
 def _wyoming_model(model: WakeModel) -> WyomingWakeModel:
