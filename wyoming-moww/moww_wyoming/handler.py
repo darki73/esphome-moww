@@ -76,10 +76,15 @@ class MowwEventHandler(AsyncEventHandler):
             return True
 
         if AudioChunk.is_type(event.type):
-            if self._detected or not self._detectors:
+            if not self._detectors:
+                return True
+            chunk = self._converter.convert(AudioChunk.from_event(event))
+            # Keep buffering session audio past the detection point: sessions
+            # that detect early would otherwise never reach the flush threshold
+            self._maybe_save_(chunk.audio)
+            if self._detected:
                 return True
             self._chunks += 1
-            chunk = self._converter.convert(AudioChunk.from_event(event))
             self._audio_bytes += len(chunk.audio)
             if self._chunks == 1 or self._chunks % 100 == 0:
                 _LOGGER.debug(
@@ -87,7 +92,6 @@ class MowwEventHandler(AsyncEventHandler):
                     self._chunks,
                     self._audio_bytes / 32000.0,
                 )
-            self._maybe_save_(chunk.audio)
             start = time.monotonic()
             for name, detector in self._detectors.items():
                 detection = detector.process(chunk.audio)
@@ -126,6 +130,11 @@ class MowwEventHandler(AsyncEventHandler):
 
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
+
+    async def disconnect(self) -> None:
+        # HA drops the socket right after a Detection without sending
+        # AudioStop; this is the only reliable flush point for those sessions
+        self._flush_save_()
 
     def _maybe_save_(self, audio: bytes) -> None:
         """Dump the first _SAVE_SECONDS of a session to a WAV for analysis."""
