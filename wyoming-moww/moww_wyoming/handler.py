@@ -31,6 +31,8 @@ class MowwEventHandler(AsyncEventHandler):
         self._detectors: dict[str, StreamDetector] = {}
         self._requested: list[str] | None = None
         self._detected = False
+        self._chunks = 0
+        _LOGGER.debug("Client connected")
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
@@ -54,12 +56,18 @@ class MowwEventHandler(AsyncEventHandler):
                 name: StreamDetector(self._models[name]) for name in names
             }
             self._detected = False
+            self._chunks = 0
             _LOGGER.debug("Audio stream started (models: %s)", ", ".join(names))
             return True
 
         if AudioChunk.is_type(event.type):
             if self._detected or not self._detectors:
                 return True
+            self._chunks += 1
+            if self._chunks == 1 or self._chunks % 100 == 0:
+                _LOGGER.debug(
+                    "Audio flowing: chunk %d (~%.1f s)", self._chunks, self._chunks * 0.08
+                )
             chunk = self._converter.convert(AudioChunk.from_event(event))
             start = time.monotonic()
             for name, detector in self._detectors.items():
@@ -88,7 +96,12 @@ class MowwEventHandler(AsyncEventHandler):
         if AudioStop.is_type(event.type):
             if not self._detected:
                 await self.write_event(NotDetected().event())
-            _LOGGER.debug("Audio stream stopped (detected=%s)", self._detected)
+            _LOGGER.debug(
+                "Audio stream stopped (detected=%s, %d chunks)",
+                self._detected,
+                self._chunks,
+            )
             return True
 
+        _LOGGER.debug("Unhandled event type: %s", event.type)
         return True

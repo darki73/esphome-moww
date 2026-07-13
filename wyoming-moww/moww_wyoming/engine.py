@@ -231,6 +231,12 @@ class StreamDetector:
             if mean < self._model.stage1_cutoff:
                 continue
             self._candidate_probability = mean
+            _LOGGER.debug(
+                "Stage-1 candidate '%s' (mean %.2f) at %d ms",
+                self._model.name,
+                mean,
+                self._timestamp_ms_(),
+            )
             if self._model.verifier is None:
                 self._refractory = REFRACTORY_AFTER_DETECT
                 self._window.clear()

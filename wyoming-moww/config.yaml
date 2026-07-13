@@ -1,5 +1,5 @@
 name: Wyoming moww
-version: 0.1.1
+version: 0.1.2
 slug: wyoming_moww
 description: Multi-stage wake word engine (streaming detector + verifier) for Assist
 url: https://github.com/darki73/esphome-moww
