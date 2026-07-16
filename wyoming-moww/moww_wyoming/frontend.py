@@ -13,10 +13,6 @@ SAMPLES_PER_STEP = 160  # 10 ms @ 16 kHz
 BYTES_PER_STEP = SAMPLES_PER_STEP * 2
 FEATURE_SIZE = 40
 STEP_MS = 10
-# Models are trained on microfrontend features scaled by 1/25.6; the tflite
-# input quantization (scale ~0.102, range 0..26) assumes the same. Feeding
-# raw 0..~670 features saturates int8 and compresses the score dynamics.
-FEATURE_SCALE = np.float32(0.0390625)
 
 
 class StreamingFrontend:
@@ -36,8 +32,6 @@ class StreamingFrontend:
             )
             index += result.samples_read * 2
             if result.features:
-                frames.append(
-                    np.asarray(result.features, dtype=np.float32) * FEATURE_SCALE
-                )
+                frames.append(np.asarray(result.features, dtype=np.float32))
         self._pending = self._pending[index:]
         return frames
